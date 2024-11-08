@@ -1,10 +1,9 @@
 #pragma once
 
+#include "Criteria.hpp"
 #include "descent_strategies/DescentStrategy.hpp"
 // Line search methods
 #include "line_search/LineSearch.hpp"
-
-#include <cppoptlib/solver/isolver.h>
 
 namespace spdlog
 {
@@ -13,14 +12,6 @@ namespace spdlog
 
 namespace polysolve::nonlinear
 {
-
-    enum class ErrorCode
-    {
-        NAN_ENCOUNTERED = -10,
-        STEP_TOO_SMALL = -1,
-        SUCCESS = 0,
-    };
-
     enum class FiniteDiffStrategy
     {
         NONE = 0,
@@ -28,9 +19,16 @@ namespace polysolve::nonlinear
         FULL_FINITE_DIFF = 2
     };
 
-    class Solver : public cppoptlib::ISolver<Problem, /*Ord=*/-1>
+    class Solver
     {
     public:
+        using Scalar = typename Problem::Scalar;
+        using TVector = typename Problem::TVector;
+        using THessian = typename Problem::THessian;
+
+    public:
+        // --- Static methods -------------------------------------------------
+
         // Static constructor
         //
         // @param[in]  solver   Solver type
@@ -43,14 +41,10 @@ namespace polysolve::nonlinear
             spdlog::logger &logger,
             const bool strict_validation = true);
 
-        // List available solvers
+        /// @brief List available solvers
         static std::vector<std::string> available_solvers();
 
-        using Superclass = ISolver<Problem, /*Ord=*/-1>;
-        using typename Superclass::Scalar;
-        using typename Superclass::TCriteria;
-        using typename Superclass::TVector;
-
+    public:
         /// @brief Construct a new Nonlinear Solver object
         /// @param solver_params JSON of solver parameters
         /// @param characteristic_length used to scale tolerances
@@ -59,37 +53,46 @@ namespace polysolve::nonlinear
                const double characteristic_length,
                spdlog::logger &logger);
 
-        void set_strategies_iterations(const json &solver_params);
+        virtual ~Solver() = default;
 
-        virtual double compute_grad_norm(const Eigen::VectorXd &x, const Eigen::VectorXd &grad) const;
-
-        void set_line_search(const json &params);
-
-        void minimize(Problem &objFunc, TVector &x) override;
-
-        const json &get_info() const { return solver_info; }
-
-        ErrorCode error_code() const { return m_error_code; }
-
-        const typename Superclass::TCriteria &getStopCriteria() { return this->m_stop; }
-        // setStopCriteria already in ISolver
-
-        bool converged() const
-        {
-            return this->m_status == cppoptlib::Status::XDeltaTolerance
-                   || this->m_status == cppoptlib::Status::FDeltaTolerance
-                   || this->m_status == cppoptlib::Status::GradNormTolerance;
-        }
-
-        size_t max_iterations() const { return this->m_stop.iterations; }
-        size_t &max_iterations() { return this->m_stop.iterations; }
-        bool allow_out_of_iterations = false;
-
+        /// @brief Add a descent strategy to the solver
+        /// @param s Descent strategy
         void add_strategy(const std::shared_ptr<DescentStrategy> &s) { m_strategies.push_back(s); }
 
+        /// @brief Minimize the objective function
+        /// @param objFunc Objective function
+        /// @param x Initial guess
+        void minimize(Problem &objFunc, TVector &x);
+
+        virtual double compute_grad_norm(const TVector &x, const TVector &grad) const;
+
+        // ====================================================================
+        // Getters and setters
+        // ====================================================================
+
+        Criteria &stop_criteria() { return m_stop; }
+        const Criteria &stop_criteria() const { return m_stop; }
+        const Criteria &current_criteria() const { return m_current; }
+        Status status() const { return m_status; }
+
+        void set_strategies_iterations(const json &solver_params);
+        void set_line_search(const json &params);
+        const json &info() const { return solver_info; }
+
+        /// @brief If true the solver will not throw an error if the maximum number of iterations is reached
+        bool allow_out_of_iterations = false;
+
+
+        /// @brief Get the line search object
         const std::shared_ptr<line_search::LineSearch> &line_search() const { return m_line_search; };
 
     protected:
+        /// @brief Compute direction in which the argument should be updated 
+        /// @param objFunc Problem to be minimized
+        /// @param x Current input (n x 1)
+        /// @param grad Gradient at current step (n x 1)
+        /// @param[out] direction Current update direction (n x 1)
+        /// @return True if update direction was found, False otherwises
         virtual bool compute_update_direction(
             Problem &objFunc,
             const TVector &x,
@@ -99,8 +102,19 @@ namespace polysolve::nonlinear
             return m_strategies[m_descent_strategy]->compute_update_direction(objFunc, x, grad, direction);
         }
 
+        /// @brief Stopping criteria
+        Criteria m_stop;
+
+        /// @brief Current criteria
+        Criteria m_current;
+
+        /// @brief Current status
+        Status m_status = Status::NotStarted;
+
+        /// @brief Index into m_strategies
         int m_descent_strategy;
 
+        /// @brief Logger to use
         spdlog::logger &m_logger;
 
         // ====================================================================
@@ -109,6 +123,10 @@ namespace polysolve::nonlinear
 
         FiniteDiffStrategy gradient_fd_strategy = FiniteDiffStrategy::NONE;
         double gradient_fd_eps = 1e-7;
+        /// @brief Check gradient versus finite difference results
+        /// @param objFunc Problem defining relevant objective function
+        /// @param x Current input (n x 1)
+        /// @param grad Current gradient (n x 1)
         virtual void verify_gradient(Problem &objFunc, const TVector &x, const TVector &grad) final;
 
     private:
@@ -116,18 +134,14 @@ namespace polysolve::nonlinear
         //                        Solver parameters
         // ====================================================================
 
-        double use_grad_norm_tol;
-        double first_grad_norm_tol;
-        double derivative_along_delta_x_tol;
-
         const double characteristic_length;
 
-        int f_delta_step_tol;
         // ====================================================================
         //                           Solver state
         // ====================================================================
-
-        // Reset the solver at the start of a minimization
+        
+        /// @brief Reset the solver at the start of a minimization
+        /// @param ndof number of degrees of freedom
         void reset(const int ndof);
 
         std::string descent_strategy_name() const { return m_strategies[m_descent_strategy]->name(); };
@@ -141,19 +155,25 @@ namespace polysolve::nonlinear
         //                            Solver info
         // ====================================================================
 
+        /// @brief Update solver info JSON object
+        /// @param energy 
         void update_solver_info(const double energy);
+
+        /// @brief Reset timing members to 0
         void reset_times();
-        void log_times();
+
+        /// @brief Log time taken in different phases of the solve
+        void log_times() const;
 
         json solver_info;
 
+        // Timers
         double total_time;
+        double obj_fun_time;
         double grad_time;
+        double update_direction_time;
         double line_search_time;
         double constraint_set_update_time;
-        double obj_fun_time;
-
-        ErrorCode m_error_code;
 
         // ====================================================================
         //                                 END
