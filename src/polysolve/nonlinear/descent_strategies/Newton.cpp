@@ -182,6 +182,12 @@ namespace polysolve::nonlinear
             compute_hessian(objFunc, x, hessian);
         }
 
+        std::set<int> bad_indices;
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("bad dof time", this->bad_dof_time, m_logger);
+            objFunc.problematic_indices(bad_indices);
+        }
+
         {
             POLYSOLVE_SCOPED_STOPWATCH("linear solve", this->inverting_time, m_logger);
 
@@ -201,7 +207,7 @@ namespace polysolve::nonlinear
                 return std::nan("");
             }
 
-            linear_solver->solve(-grad, direction); // H Δx = -g
+            linear_solver->solve(-grad, direction, bad_indices); // H Δx = -g
         }
 
         const double residual = objFunc.grad_norm(hessian * direction + grad, norm_type); // H Δx + g = 0
@@ -225,6 +231,12 @@ namespace polysolve::nonlinear
             compute_hessian(objFunc, x, hessian);
         }
 
+        std::set<int> bad_indices;
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("bad dof time", this->bad_dof_time, m_logger);
+            objFunc.problematic_indices(bad_indices);
+        }
+
         {
             POLYSOLVE_SCOPED_STOPWATCH("linear solve", this->inverting_time, m_logger);
 
@@ -232,7 +244,7 @@ namespace polysolve::nonlinear
             {
                 linear_solver->analyze_pattern_dense(hessian, hessian.rows());
                 linear_solver->factorize_dense(hessian);
-                linear_solver->solve(-grad, direction);
+                linear_solver->solve(-grad, direction, bad_indices);
             }
             catch (const std::runtime_error &err)
             {
