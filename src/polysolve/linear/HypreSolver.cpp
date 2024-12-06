@@ -1,3 +1,4 @@
+#define POLYSOLVE_WITH_HYPRE
 #ifdef POLYSOLVE_WITH_HYPRE
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -189,7 +190,7 @@ namespace polysolve::linear
         void HypreBoomerAMG_SetElasticityOptions(HYPRE_Solver &amg_precond, int dim, double theta, bool nodal_coarsening, bool interp_rbms, const Eigen::MatrixXd &positions, std::vector<HYPRE_IJVector> &rbms, std::vector<HYPRE_ParVector> &par_rbms)
         {
             // Make sure the systems AMG options are set
-            HYPRE_BoomerAMGSetNumFunctions(amg_precond, dim);
+            HYPRE_BoomerAMGSetNumFunctions(amg_precond, /*dim*/2);
 
             // More robust options with respect to convergence
             HYPRE_BoomerAMGSetAggNumLevels(amg_precond, 0);
@@ -307,7 +308,7 @@ namespace polysolve::linear
         std::vector<HYPRE_ParVector> par_rbms(num_rbms);
         std::vector<HYPRE_IJVector> rbms(num_rbms);
         HypreBoomerAMG_SetDefaultOptions(precond);
-        if (dimension_ > 1)
+        if (true || dimension_ > 1)
         {
             Eigen::MatrixXd positions_;
             assert(!interp_rbms);
@@ -345,7 +346,7 @@ namespace polysolve::linear
 
     void HypreSolver::mixed_direct_iterative_solve(const Ref<const VectorXd> b, Ref<VectorXd> x)
     {
-
+        
     }
 
     ////////////////////////////////////////////////////////////////////////////////
