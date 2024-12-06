@@ -70,6 +70,22 @@ namespace polysolve::linear
             {
                 dimension_ = params["Hypre"]["dimension"];
             }
+            if (params["Hypre"].contains("theta"))
+            {
+                theta = params["Hypre"]["theta"];
+            }
+            if (params["Hypre"].contains("nodal_coarsening"))
+            {
+                nodal_coarsening = params["Hypre"]["nodal_coarsening"];
+            }
+            if (params["Hypre"].contains("interp_rbms"))
+            {
+                interp_rbms = params["Hypre"]["interp_rbms"];
+            }
+            if (params["Hypre"].contains("dimension"))
+            {
+                dimension_ = params["Hypre"]["dimension"];
+            }
         }
     }
 
@@ -190,9 +206,11 @@ namespace polysolve::linear
         void HypreBoomerAMG_SetElasticityOptions(HYPRE_Solver &amg_precond, int dim, double theta, bool nodal_coarsening, bool interp_rbms, const Eigen::MatrixXd &positions, std::vector<HYPRE_IJVector> &rbms, std::vector<HYPRE_ParVector> &par_rbms)
         {
             // Make sure the systems AMG options are set
-            HYPRE_BoomerAMGSetNumFunctions(amg_precond, /*dim*/2);
+            HYPRE_BoomerAMGSetNumFunctions(amg_precond, dim);
 
             // More robust options with respect to convergence
+            HYPRE_BoomerAMGSetAggNumLevels(amg_precond, 0);
+            HYPRE_BoomerAMGSetStrongThreshold(amg_precond, theta);
             HYPRE_BoomerAMGSetAggNumLevels(amg_precond, 0);
             HYPRE_BoomerAMGSetStrongThreshold(amg_precond, theta);
 
@@ -308,7 +326,7 @@ namespace polysolve::linear
         std::vector<HYPRE_ParVector> par_rbms(num_rbms);
         std::vector<HYPRE_IJVector> rbms(num_rbms);
         HypreBoomerAMG_SetDefaultOptions(precond);
-        if (true || dimension_ > 1)
+        if (dimension_ > 1)
         {
             Eigen::MatrixXd positions_;
             assert(!interp_rbms);
