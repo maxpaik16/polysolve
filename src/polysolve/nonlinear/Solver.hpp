@@ -103,6 +103,7 @@ namespace polysolve::nonlinear
             const TVector &grad,
             TVector &direction)
         {
+            m_strategies[m_descent_strategy]->set_nullspace(nullspace);
             return m_strategies[m_descent_strategy]->compute_update_direction(objFunc, x, grad, direction);
         }
 
@@ -196,6 +197,8 @@ namespace polysolve::nonlinear
         double update_direction_time;
         double line_search_time;
         double constraint_set_update_time;
+
+        Eigen::MatrixXd nullspace;
 
         // ====================================================================
         //                                 END
