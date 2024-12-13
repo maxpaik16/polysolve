@@ -209,8 +209,8 @@ namespace polysolve::nonlinear
                 // Eigen::saveMarket(hessian, "problematic_hessian.mtx");
                 return std::nan("");
             }
-
-            linear_solver->solve(-grad, nullspace, direction); // H Δx = -g
+            linear_solver->set_nullspace(nullspace);
+            linear_solver->solve(-grad, direction); // H Δx = -g
         }
 
         const double residual = objFunc.grad_norm(hessian * direction + grad, norm_type); // H Δx + g = 0
@@ -249,8 +249,9 @@ namespace polysolve::nonlinear
             try
             {
                 linear_solver->analyze_pattern_dense(hessian, hessian.rows());
-                linear_solver->factorize_dense(hessian);
-                linear_solver->solve(-grad, nullspace, direction);
+                linear_solver->factorize_dense(hessian);   
+                linear_solver->set_nullspace(nullspace);
+                linear_solver->solve(-grad, direction);
             }
             catch (const std::runtime_error &err)
             {

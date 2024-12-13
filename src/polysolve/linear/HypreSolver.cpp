@@ -205,6 +205,7 @@ namespace polysolve::linear
 
         void HypreBoomerAMG_SetElasticityOptions(HYPRE_Solver &amg_precond, int dim, double theta, bool nodal_coarsening, bool interp_rbms, const Eigen::MatrixXd &positions, std::vector<HYPRE_IJVector> &rbms, std::vector<HYPRE_ParVector> &par_rbms)
         {
+            std::cout << "Setting elasticity options" << std::endl;
             // Make sure the systems AMG options are set
             HYPRE_BoomerAMGSetNumFunctions(amg_precond, dim);
 
