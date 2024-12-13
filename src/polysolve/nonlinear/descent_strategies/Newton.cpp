@@ -188,15 +188,7 @@ namespace polysolve::nonlinear
                 return std::nan("");
             }
 
-            linear::TrilinosSolver* trilinos_solver = dynamic_cast<TrilinosSolver*>(linear_solver);
-            if (trilinos_solver)
-            {
-                trilinos_solver->solve(-grad, nullspace, direction);
-            } 
-            else 
-            {
-                linear_solver->solve(-grad, direction); // H Δx = -g
-            }
+            linear_solver->solve(-grad, nullspace, direction);
         }
 
         const double residual = (hessian * direction + grad).norm(); // H Δx + g = 0
@@ -227,15 +219,7 @@ namespace polysolve::nonlinear
             {
                 linear_solver->analyze_pattern_dense(hessian, hessian.rows());
                 linear_solver->factorize_dense(hessian);
-                linear::TrilinosSolver* trilinos_solver = dynamic_cast<TrilinosSolver*>(linear_solver);
-                if (trilinos_solver)
-                {
-                    trilinos_solver->solve(-grad, nullspace, direction);
-                } 
-                else 
-                {
-                    linear_solver->solve(-grad, direction); // H Δx = -g
-                }
+                linear_solver->solve(-grad, nullspace, direction);
             }
             catch (const std::runtime_error &err)
             {

@@ -73,7 +73,7 @@ namespace polysolve::linear
 
         // Solve the linear system Ax = b
         virtual void solve(const Ref<const VectorXd> b, Ref<VectorXd> x) override;
-        virtual void solve(const Ref<const VectorXd> b, const Ref<const MatrixXd> nullspace, Ref<VectorXd> x);
+        virtual void solve(const Ref<const VectorXd> b, const Ref<const MatrixXd> nullspace, Ref<VectorXd> x) override;
         
         // Name of the solver type (for debugging purposes)
         virtual std::string name() const override { return "Trilinos AztecOO and ML"; }

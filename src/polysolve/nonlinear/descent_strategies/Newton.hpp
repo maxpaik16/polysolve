@@ -4,10 +4,10 @@
 #include <polysolve/Utils.hpp>
 
 #include <polysolve/linear/Solver.hpp>
-#include <polysolve/linear/TrilinosSolver.hpp>
 
 namespace polysolve::nonlinear
 {
+    
     class Newton : public DescentStrategy
     {
     public:
