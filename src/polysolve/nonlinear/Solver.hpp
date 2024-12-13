@@ -86,6 +86,31 @@ namespace polysolve::nonlinear
         /// @brief Get the line search object
         const std::shared_ptr<line_search::LineSearch> &line_search() const { return m_line_search; };
 
+        void update_nullspace(const Eigen::MatrixXd &vertices, const std::vector<int> &boundary_nodes)
+        {
+            // Remove boundary vertices
+            if (boundary_nodes.empty())
+            {
+                nullspace = vertices;
+            }
+            else
+            {
+                std::vector<int> order_nodes = boundary_nodes;
+                std::sort(order_nodes.begin(), order_nodes.end());
+                Eigen::MatrixXd out_vertices;
+                std::vector<int> keep;
+                for (int i = 0; i < vertices.rows(); i++)
+                {
+                    if (!std::binary_search(order_nodes.begin(), order_nodes.end(),i))
+                    {
+                        keep.push_back(i);
+                    }
+                }
+                out_vertices = vertices(keep, Eigen::all);
+                nullspace = out_vertices;
+            }
+        }
+
     protected:
         /// @brief Compute direction in which the argument should be updated 
         /// @param objFunc Problem to be minimized
@@ -177,31 +202,6 @@ namespace polysolve::nonlinear
         double constraint_set_update_time;
 
         Eigen::MatrixXd nullspace;
-
-        void update_nullspace(const Eigen::MatrixXd &vertices, const std::vector<int> &boundary_nodes)
-        {
-            // Remove boundary vertices
-            if (boundary_nodes.empty())
-            {
-                nullspace = vertices;
-            }
-            else
-            {
-                std::vector<int> order_nodes = boundary_nodes;
-                std::sort(order_nodes.begin(), order_nodes.end());
-                Eigen::MatrixXd out_vertices;
-                std::vector<int> keep;
-                for (int i = 0; i < vertices.rows(); i++)
-                {
-                    if (!std::binary_search(order_nodes.begin(), order_nodes.end(),i))
-                    {
-                        keep.push_back(i);
-                    }
-                }
-                out_vertices = vertices(keep, Eigen::all);
-                nullspace = out_vertices;
-            }
-        }
 
         // ====================================================================
         //                                 END
