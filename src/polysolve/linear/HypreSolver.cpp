@@ -250,6 +250,57 @@ namespace polysolve::linear
                 // HYPRE_BoomerAMGSetInterpRefine(amg_precond, interp_refine);
 
                 Eigen::VectorXd rbm_xy, rbm_zx, rbm_yz;
+                rbm_xy.resize(nullspace.size());
+                rbm_zx.resize(nullspace.size());
+                rbm_yz.resize(nullspace.size());
+                rbm_xy.setZero();
+                rbm_zx.setZero();
+                rbm_yz.setZero();
+
+                for (int i = 0; i < nullspace.rows(); ++i)
+                {
+                    rbm_xy(0 + i*dim) = nullspace(i, 1);
+                    rbm_xy(1 + i*dim) = -1 * nullspace(i, 0);
+
+                    rbm_zx(1 + i*dim) = nullspace(i, 2);
+                    rbm_zx(2 + i*dim) = -1 * nullspace(i, 1);
+
+                    rbm_yz(2 + i*dim) = nullspace(i, 0);
+                    rbm_yz(0 + i*dim) = -1 * nullspace(i, 2);
+                }
+
+                HYPRE_IJVector rbms[3];
+                HYPRE_ParVector par_rbms[3];
+
+                for (int i = 0; i < 3; ++i)
+                {
+                    HYPRE_IJVectorCreate(0, 0, nullspace.size() - 1, &(rbms[i]));
+                    HYPRE_IJVectorSetObjectType(rbms[i], HYPRE_PARCSR);
+                    HYPRE_IJVectorInitialize(rbms[i]);  
+                }
+
+                for (HYPRE_Int i = 0; i < nullspace.size(); ++i)
+                {
+                    const HYPRE_Int index[1] = {i};
+                    
+                    const HYPRE_Complex vxy[1] = {HYPRE_Complex(rbm_xy(i))};
+                    HYPRE_IJVectorSetValues(rbms[0], 1, index, vxy);
+                    
+                    const HYPRE_Complex vzx[1] = {HYPRE_Complex(rbm_zx(i))};
+                    HYPRE_IJVectorSetValues(rbms[1], 1, index, vzx);
+                    
+                    const HYPRE_Complex vyz[1] = {HYPRE_Complex(rbm_yz(i))};
+                    HYPRE_IJVectorSetValues(rbms[2], 1, index, vyz);
+                }
+
+            
+                for (int i = 0; i < 3; ++i)
+                {
+                    HYPRE_IJVectorAssemble(rbms[i]);
+                    HYPRE_IJVectorGetObject(rbms[i], (void **)&(par_rbms[i]));
+                }
+
+                Eigen::VectorXd rbm_xy, rbm_zx, rbm_yz;
                 rbm_xy.resize(positions.size());
                 rbm_xy.setZero();
 
