@@ -255,10 +255,10 @@ namespace polysolve::linear
         {
 
             // std::cout<<"Max iterations "<<max_iter_<<std::endl;
-            // std::cout<<"Trilinos ScaleResidual is is "<<solver.TrueResidual ()<<std::endl;
-            // std::cout<<"Trilinos ScaleResidual is "<<solver.ScaledResidual ()<<std::endl;
-            // std::cout<<"Iterations are "<<solver.NumIters()<<std::endl;
-            residual_error_=solver.ScaledResidual ();
+            std::cout<<"Trilinos TrueResidual is "<<solver.TrueResidual()<<std::endl;
+            std::cout<<"Trilinos ScaledResidual is "<<solver.ScaledResidual()<<std::endl;
+            std::cout<<"Iterations:  "<<solver.NumIters()<<std::endl;
+            residual_error_=solver.ScaledResidual();
             iterations_=solver.NumIters();
         }
         
