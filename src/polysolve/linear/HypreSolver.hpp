@@ -56,8 +56,6 @@ namespace polysolve::linear
         // Name of the solver type (for debugging purposes)
         virtual std::string name() const override { return "Hypre"; }
 
-        spdlog::logger *logger = nullptr;
-
         virtual void set_tolerance(const double tol) override {conv_tol_ = tol;}
 
     protected:
