@@ -281,10 +281,6 @@ namespace polysolve::linear
                     }
                 }
 
-                const int num_rbms = dim == 2 ? 1 : 3;
-                std::vector<HYPRE_ParVector> par_rbms(num_rbms);
-                std::vector<HYPRE_IJVector> rbms(num_rbms);
-
                 eigen_to_hypre_par_vec(par_rbms[0], rbms[0], rbm_xy);
                 if (dim == 3)
                 {
