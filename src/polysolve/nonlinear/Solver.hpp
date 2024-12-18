@@ -89,6 +89,10 @@ namespace polysolve::nonlinear
         {
             return objFunc.grad_norm(grad, m_norm_type);
         }
+        void set_positions(const Eigen::MatrixXd &positions_)
+        {
+            positions = positions_;
+        }
 
     protected:
         /// @brief Compute direction in which the argument should be updated 
@@ -103,7 +107,7 @@ namespace polysolve::nonlinear
             const TVector &grad,
             TVector &direction)
         {
-            m_strategies[m_descent_strategy]->set_nullspace(nullspace);
+            m_strategies[m_descent_strategy]->set_positions(positions);
             return m_strategies[m_descent_strategy]->compute_update_direction(objFunc, x, grad, direction);
         }
 
@@ -198,7 +202,7 @@ namespace polysolve::nonlinear
         double line_search_time;
         double constraint_set_update_time;
 
-        Eigen::MatrixXd nullspace;
+        Eigen::MatrixXd positions;
 
         // ====================================================================
         //                                 END
