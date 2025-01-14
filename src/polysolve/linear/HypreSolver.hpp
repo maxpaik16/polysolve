@@ -51,7 +51,6 @@ namespace polysolve::linear
         // Solve the linear system Ax = b
         virtual void solve(const Ref<const VectorXd> b, Ref<VectorXd> x) override;
 
-        virtual void set_problematic_dofs(std::set<int> &bad_indices) override {bad_indices_ = bad_indices;}
 
         // Name of the solver type (for debugging purposes)
         virtual std::string name() const override { return "Hypre"; }
@@ -82,6 +81,8 @@ namespace polysolve::linear
     private:
         bool has_matrix_ = false;
         int precond_num_;
+
+        Eigen::MatrixXd eigen_A;
 
         HYPRE_IJMatrix A;
         HYPRE_ParCSRMatrix parcsr_A;
