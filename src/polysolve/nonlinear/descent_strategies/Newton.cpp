@@ -197,6 +197,7 @@ namespace polysolve::nonlinear
                 return std::nan("");
             }
             linear_solver->set_positions(positions);
+            linear_solver->set_problematic_dofs(problematic_indices);
             linear_solver->solve(-grad, direction); // H Δx = -g
         }
 
@@ -238,6 +239,7 @@ namespace polysolve::nonlinear
                 linear_solver->analyze_pattern_dense(hessian, hessian.rows());
                 linear_solver->factorize_dense(hessian);   
                 linear_solver->set_positions(positions);
+                linear_solver->set_problematic_dofs(problematic_indices);
                 linear_solver->solve(-grad, direction);
             }
             catch (const std::runtime_error &err)
