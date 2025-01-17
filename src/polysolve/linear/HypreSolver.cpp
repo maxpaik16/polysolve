@@ -431,7 +431,7 @@ namespace polysolve::linear
                 p = r + beta * p;
             }
 
-            final_res_norm = rhs - (eigen_A * result);
+            final_res_norm = r.norm();
 
 
 
