@@ -429,6 +429,21 @@ namespace polysolve::linear
                 }
                 double beta = r.dot(r) / old_r_norm;
                 p = r + beta * p;
+
+                // Preconditioner
+
+                eigen_to_hypre_par_vec(par_x, x, result);
+
+                HYPRE_BoomerAMGSolve(precond, parcsr_A, par_b, par_x);
+
+                for (HYPRE_Int i = 0; i < rhs.size(); ++i)
+                {
+                    const HYPRE_Int index[1] = {i};
+                    HYPRE_Complex v[1];
+                    HYPRE_IJVectorGetValues(x, 1, index, v);
+
+                    result(i) = v[0];
+                }
             }
 
             final_res_norm = r.norm();
