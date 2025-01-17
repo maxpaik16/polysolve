@@ -121,6 +121,8 @@ namespace polysolve::nonlinear
         virtual double grad_norm(const TVector &grad, const NormType norm_type) const {return grad.norm();}
         virtual double step_norm(const TVector &x, const NormType norm_type) const {return x.norm();}
 
+        void get_problematic_indices(std::vector<std::set<int>> &bad_indices) {};
+
         /// --- Misc ----------------------------------------------------------
 
         /// @brief Sample the function along a direction.

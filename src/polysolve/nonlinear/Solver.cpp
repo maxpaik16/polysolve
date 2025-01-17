@@ -325,6 +325,8 @@ namespace polysolve::nonlinear
                 verify_gradient(objFunc, x, grad);
             }
 
+            objFunc.get_problematic_indices(problematic_indices);
+
             m_current.gradNorm = compute_grad_norm(objFunc, x, grad);
             if (m_current.iterations == 0)
             {
