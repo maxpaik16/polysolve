@@ -449,7 +449,7 @@ namespace polysolve::linear
             Eigen::VectorXd z(r.size());
             Eigen::VectorXd t(r.size());
             z.setZero();
-            t.setZero();
+            t = r;
 
             HYPRE_BoomerAMGSetup(precond, parcsr_A, par_b, par_x);
 
@@ -491,10 +491,6 @@ namespace polysolve::linear
                     t(i) = sub_result(i_counter);
                     ++i_counter;
                 }
-            }
-            else
-            {
-                t = r;
             }
 
             eigen_to_hypre_par_vec(par_x, x, z);
@@ -554,7 +550,7 @@ namespace polysolve::linear
                 }
 
                 z.setZero(); 
-                t.setZero();
+                t = r;
 
                 if (bad_indices_[0].size() > 0 && max_iter_ == 400)
                 {
@@ -563,29 +559,17 @@ namespace polysolve::linear
                     for (auto &i : subdomain)
                     {
                         sub_rhs(i_counter) = r(i);
-                        int j_counter = 0;
-                        for (auto &j : subdomain)
-                        {
-                            D(i_counter, j_counter) = eigen_A(i, j);
-                            ++j_counter;
-                        }
-                    
                         ++i_counter;
                     }
 
-                    D_solver = D.ldlt();
-
                     sub_result = D_solver.solve(sub_rhs);
+
                     i_counter = 0;
                     for (auto &i : subdomain)
                     {
                         t(i) = sub_result(i_counter);
                         ++i_counter;
                     }
-                }
-                else
-                {
-                    t = r;
                 }
 
                 eigen_to_hypre_par_vec(par_x, x, z);
