@@ -497,7 +497,7 @@ namespace polysolve::linear
             //HYPRE_BoomerAMGSolve(precond, parcsr_A, par_b, par_x);
 
             //hypre_vec_to_eigen(x, z); 
-            //p = z;
+            p = z;
 
             double gamma = r.dot(z);
             double old_gamma = gamma;
