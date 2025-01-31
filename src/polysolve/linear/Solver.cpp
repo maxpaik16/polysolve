@@ -39,6 +39,7 @@
 #ifdef POLYSOLVE_WITH_CUSOLVER
 #include "CuSolverDN.cuh"
 #endif
+#include "ExperimentalSolver.hpp"
 #include <unsupported/Eigen/IterativeSolvers>
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -447,6 +448,10 @@ namespace polysolve::linear
         {
             RETURN_DIRECT_DENSE_SOLVER_PTR(LDLT, "Eigen::LDLT");
         }
+        else if (solver == "Experimental")
+        {
+            return std::make_unique<ExperimentalSolver>();
+        }
         // else if (solver == "Eigen::BDCSVD")
         // {
         //     RETURN_DIRECT_DENSE_SOLVER_PTR(BDCSVD, "Eigen::BDCSVD");
@@ -517,7 +522,8 @@ namespace polysolve::linear
             "Eigen::FullPivHouseholderQR",
             "Eigen::CompleteOrthogonalDecomposition",
             "Eigen::LLT",
-            "Eigen::LDLT"
+            "Eigen::LDLT",
+            "Experimental"
             // "Eigen::BDCSVD",
             // "Eigen::JacobiSVD"
         }};
