@@ -18,7 +18,8 @@
             "StochasticADAM",
             "StochasticGradientDescent",
             "box_constraints",
-            "advanced"
+            "advanced",
+            "QuasiNewtonLBFGS"
         ],
         "doc": "Settings for nonlinear solver. Interior-loop linear solver settings are defined in the solver/linear section."
     },
