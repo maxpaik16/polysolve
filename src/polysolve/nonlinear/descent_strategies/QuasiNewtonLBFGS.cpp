@@ -14,7 +14,8 @@ namespace polysolve::nonlinear
                      logger)
     {
         linear_solver = polysolve::linear::Solver::create(linear_solver_params, logger);
-        m_history_size = extract_param("L-BFGS", "history_size", solver_params);
+        m_history_size = extract_param("QuasiNewtonLBFGS", "history_size", solver_params);
+        restart_interval = extract_param("QuasiNewtonLBFGS", "restart_interval", solver_params);
         if (m_history_size <= 0)
             log_and_throw_error(logger, "QuasiNewton-L-BFGS history_size must be >=1, instead got {}", m_history_size);
     }
@@ -32,6 +33,14 @@ namespace polysolve::nonlinear
         const TVector &grad,
         TVector &direction)
     {
+        if (interval_counter % restart_interval == 0)
+        {
+            interval_counter = 0;
+            reset(x.size());
+        }
+
+        ++interval_counter;
+
         if (initial_hessian.rows() == 0)
         {
             m_logger.trace("Factorizing new initial Hessian");

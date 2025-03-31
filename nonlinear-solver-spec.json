@@ -91,6 +91,28 @@
         "doc": "If false (default), an exception will be thrown when the nonlinear solver reaches the maximum number of iterations."
     },
     {
+        "pointer": "/QuasiNewtonLBFGS",
+        "default": null,
+        "type": "object",
+        "optional": [
+            "history_size",
+            "restart_interval"
+        ],
+        "doc": "Options for Quasi Newton LBFGS."
+    },
+    {
+        "pointer": "/QuasiNewtonLBFGS/history_size",
+        "default": 6,
+        "type": "int",
+        "doc": "The number of corrections to approximate the inverse Hessian matrix."
+    },
+    {
+        "pointer": "/QuasiNewtonLBFGS/restart_interval",
+        "default": 1e10,
+        "type": "int",
+        "doc": "How often to recompute full Hessian"
+    },
+    {
         "pointer": "/L-BFGS",
         "default": null,
         "type": "object",

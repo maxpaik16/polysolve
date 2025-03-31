@@ -42,6 +42,8 @@ namespace polysolve::nonlinear
         /// (corrections). The default value is \c 6. Values less than \c 3 are
         /// not recommended. Large values will result in excessive computing time.
         int m_history_size;
+        int restart_interval;
+        int interval_counter = 0;
         std::list<TVector> x_history;
         std::list<TVector> grad_history;
 
