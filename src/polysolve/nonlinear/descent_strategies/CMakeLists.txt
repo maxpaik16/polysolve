@@ -10,6 +10,8 @@ set(SOURCES
 	ADAM.hpp
 	Newton.hpp
 	Newton.cpp
+	QuasiNewtonLBFGS.hpp
+	QuasiNewtonLBFGS.cpp
 )
 
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Source Files" FILES ${SOURCES})
