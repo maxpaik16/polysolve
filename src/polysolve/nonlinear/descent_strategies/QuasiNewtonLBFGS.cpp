@@ -92,6 +92,8 @@ namespace polysolve::nonlinear
             r += (zeta[i] - eta) * s[i];
         }
 
+        direction = r;
+
         if (x_history.size() == m_history_size)
         {
             x_history.pop_front();
