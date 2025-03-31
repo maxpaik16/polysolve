@@ -36,7 +36,8 @@
             "L-BFGS",
             "BFGS",
             "L-BFGS-B",
-            "MMA"
+            "MMA",
+            "QuasiNewtonLBFGS"
         ],
         "doc": "Nonlinear solver type"
     },
