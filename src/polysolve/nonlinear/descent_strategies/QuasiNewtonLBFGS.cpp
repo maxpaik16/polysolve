@@ -23,8 +23,10 @@ namespace polysolve::nonlinear
     void QuasiNewtonLBFGS::reset(const int ndof)
     {
         Superclass::reset(ndof);
-
         initial_hessian.resize(0, 0);
+        x_history.clear();
+        grad_history.clear();
+        interval_counter = 0;
     }
 
     bool QuasiNewtonLBFGS::compute_update_direction(
@@ -35,8 +37,8 @@ namespace polysolve::nonlinear
     {
         if (interval_counter % restart_interval == 0)
         {
-            interval_counter = 0;
             reset(x.size());
+            
         }
 
         ++interval_counter;
