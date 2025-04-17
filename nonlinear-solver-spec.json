@@ -97,7 +97,8 @@
         "type": "object",
         "optional": [
             "history_size",
-            "restart_interval"
+            "restart_interval",
+            "always_use_first_hessian"
         ],
         "doc": "Options for Quasi Newton LBFGS."
     },
@@ -112,6 +113,12 @@
         "default": 1e10,
         "type": "int",
         "doc": "How often to recompute full Hessian"
+    },
+    {
+        "pointer": "/QuasiNewtonLBFGS/always_use_first_hessian",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to always use first Hessian"
     },
     {
         "pointer": "/L-BFGS",

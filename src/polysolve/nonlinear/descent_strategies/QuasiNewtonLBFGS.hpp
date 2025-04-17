@@ -44,6 +44,7 @@ namespace polysolve::nonlinear
         int m_history_size;
         int restart_interval;
         int interval_counter = 0;
+        bool always_use_first_hessian = false;
         std::list<TVector> x_history;
         std::list<TVector> grad_history;
 

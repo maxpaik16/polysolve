@@ -16,6 +16,7 @@ namespace polysolve::nonlinear
         linear_solver = polysolve::linear::Solver::create(linear_solver_params, logger);
         m_history_size = extract_param("QuasiNewtonLBFGS", "history_size", solver_params);
         restart_interval = extract_param("QuasiNewtonLBFGS", "restart_interval", solver_params);
+        always_use_first_hessian = extract_param("QuasiNewtonLBFGS", "always_use_first_hessian", solver_params);
         if (m_history_size <= 0)
             log_and_throw_error(logger, "QuasiNewton-L-BFGS history_size must be >=1, instead got {}", m_history_size);
     }
@@ -23,7 +24,10 @@ namespace polysolve::nonlinear
     void QuasiNewtonLBFGS::reset(const int ndof)
     {
         Superclass::reset(ndof);
-        initial_hessian.resize(0, 0);
+        if (!always_use_first_hessian)
+        {
+            initial_hessian.resize(0, 0);
+        }
         x_history.clear();
         grad_history.clear();
         interval_counter = 0;
@@ -38,7 +42,6 @@ namespace polysolve::nonlinear
         if (interval_counter % restart_interval == 0)
         {
             reset(x.size());
-            
         }
 
         ++interval_counter;
