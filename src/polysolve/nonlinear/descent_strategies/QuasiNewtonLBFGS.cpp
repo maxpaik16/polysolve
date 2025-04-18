@@ -48,13 +48,21 @@ namespace polysolve::nonlinear
 
         if (initial_hessian.rows() == 0)
         {
-            m_logger.trace("Factorizing new initial Hessian");
-            objFunc.hessian(x, initial_hessian);
+            double evaluate_hessian_time;
+            {
+                POLYSOLVE_SCOPED_STOPWATCH("evaluate hessian", this->assembly_time, m_logger);
+                m_logger.trace("Factorizing new initial Hessian");
+                objFunc.hessian(x, initial_hessian);
+            }
 
             try
             {
-                linear_solver->analyze_pattern(initial_hessian, initial_hessian.rows());
-                linear_solver->factorize(initial_hessian);
+                double fact_time;
+                {
+                    POLYSOLVE_SCOPED_STOPWATCH("factorization time", fact_time, m_logger);
+                    linear_solver->analyze_pattern(initial_hessian, initial_hessian.rows());
+                    linear_solver->factorize(initial_hessian);
+                }
             }
             catch (const std::runtime_error &err)
             {
@@ -63,50 +71,55 @@ namespace polysolve::nonlinear
             }
         }
 
-        TVector q = -grad;
-
-        const int curr_m = x_history.size();
-
-        std::vector<TVector> s(curr_m);
-        std::vector<TVector> t(curr_m);
-        std::vector<double> rho(curr_m);
-        std::vector<double> zeta(curr_m);
-
-        Eigen::VectorXd last_x = x;
-        int i_counter = curr_m - 1;
-        for (auto curr_x = x_history.rbegin(); curr_x != x_history.rend(); ++curr_x)
+        double update_time;
         {
-            s[i_counter] = last_x - *curr_x;
-            last_x = *curr_x;
-            --i_counter;
+            POLYSOLVE_SCOPED_STOPWATCH("update hessian time", update_time, m_logger);
+        
+            TVector q = -grad;
+
+            const int curr_m = x_history.size();
+
+            std::vector<TVector> s(curr_m);
+            std::vector<TVector> t(curr_m);
+            std::vector<double> rho(curr_m);
+            std::vector<double> zeta(curr_m);
+
+            Eigen::VectorXd last_x = x;
+            int i_counter = curr_m - 1;
+            for (auto curr_x = x_history.rbegin(); curr_x != x_history.rend(); ++curr_x)
+            {
+                s[i_counter] = last_x - *curr_x;
+                last_x = *curr_x;
+                --i_counter;
+            }
+
+            Eigen::VectorXd last_grad = grad;
+            i_counter = curr_m - 1;
+            for (auto curr_grad = grad_history.rbegin(); curr_grad != grad_history.rend(); ++curr_grad)
+            {
+                t[i_counter] = last_grad - *curr_grad;
+                last_grad = *curr_grad;
+                --i_counter;
+            }
+
+            for (int i = curr_m - 1; i >= 0; --i)
+            {
+                rho[i] = t[i].dot(s[i]);
+                zeta[i] = s[i].dot(q) / rho[i];
+                q  -= zeta[i] * t[i];
+            }
+
+            Eigen::VectorXd r(x.size());
+            linear_solver->solve(q, r);
+
+            for (int i = 0; i < curr_m; ++i)
+            {
+                double eta = t[i].dot(r) / rho[i];
+                r += (zeta[i] - eta) * s[i];
+            }
+
+            direction = r;
         }
-
-        Eigen::VectorXd last_grad = grad;
-        i_counter = curr_m - 1;
-        for (auto curr_grad = grad_history.rbegin(); curr_grad != grad_history.rend(); ++curr_grad)
-        {
-            t[i_counter] = last_grad - *curr_grad;
-            last_grad = *curr_grad;
-            --i_counter;
-        }
-
-        for (int i = curr_m - 1; i >= 0; --i)
-        {
-            rho[i] = t[i].dot(s[i]);
-            zeta[i] = s[i].dot(q) / rho[i];
-            q  -= zeta[i] * t[i];
-        }
-
-        Eigen::VectorXd r(x.size());
-        linear_solver->solve(q, r);
-
-        for (int i = 0; i < curr_m; ++i)
-        {
-            double eta = t[i].dot(r) / rho[i];
-            r += (zeta[i] - eta) * s[i];
-        }
-
-        direction = r;
 
         if (x_history.size() == m_history_size)
         {
