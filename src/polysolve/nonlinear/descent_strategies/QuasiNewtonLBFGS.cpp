@@ -50,7 +50,7 @@ namespace polysolve::nonlinear
         {
             double evaluate_hessian_time;
             {
-                POLYSOLVE_SCOPED_STOPWATCH("evaluate hessian", this->assembly_time, m_logger);
+                POLYSOLVE_SCOPED_STOPWATCH("evaluate hessian", evaluate_hessian_time, m_logger);
                 m_logger.trace("Factorizing new initial Hessian");
                 objFunc.hessian(x, initial_hessian);
             }
