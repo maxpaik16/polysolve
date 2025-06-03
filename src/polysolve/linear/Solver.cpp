@@ -62,6 +62,7 @@ namespace polysolve::linear {
 #endif
 #ifdef POLYSOLVE_WITH_CUSOLVER
 #include "CuSolverDN.cuh"
+#include "CuSolverSP.cuh"
 #endif
 #include <unsupported/Eigen/IterativeSolvers>
 
@@ -398,6 +399,13 @@ namespace polysolve::linear
         else if (solver == "cuSolverDN_float")
         {
             return std::make_unique<CuSolverDN<float>>();
+        else if (solver == "cuSolverSP")
+        {
+            return std::make_unique<CuSolverSP<double>>();
+        }
+        else if (solver == "cuSolverSP_float")
+        {
+            return std::make_unique<CuSolverSP<float>>();
 #endif
 #ifdef POLYSOLVE_WITH_HYPRE
         }
@@ -530,6 +538,8 @@ namespace polysolve::linear
 #ifdef POLYSOLVE_WITH_CUSOLVER
             "cuSolverDN",
             "cuSolverDN_float",
+            "cuSolverSP",
+            "cuSolverSP_float",
 #endif
 #ifdef POLYSOLVE_WITH_HYPRE
             "Hypre",

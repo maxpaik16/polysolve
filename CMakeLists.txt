@@ -82,7 +82,7 @@ option(POLYSOLVE_WITH_UMFPACK       "Enable UmfPack library"                    
 option(POLYSOLVE_WITH_SUPERLU       "Enable SuperLU library"                             ON)
 option(POLYSOLVE_WITH_SPQR          "Enable SPQR library"                                ON)
 option(POLYSOLVE_WITH_MKL           "Enable MKL library"  ${POLYSOLVE_NOT_ON_APPLE_SILICON})
-option(POLYSOLVE_WITH_CUSOLVER      "Enable cuSOLVER library"                           OFF)
+option(POLYSOLVE_WITH_CUSOLVER      "Enable cuSOLVER library"                           ON)
 option(POLYSOLVE_WITH_PARDISO       "Enable Pardiso library"                            OFF)
 option(POLYSOLVE_WITH_HYPRE         "Enable hypre"                                       ON)
 option(POLYSOLVE_WITH_AMGCL         "Use AMGCL"                                          ON)
@@ -303,6 +303,7 @@ endif()
 
 # cuSolver solvers
 if(POLYSOLVE_WITH_CUSOLVER)
+    set(CUDA_ARCHITECTURES "native")
     include(cusolverdn)
     if(TARGET CUDA::cusolver)
         target_link_libraries(polysolve_linear PUBLIC CUDA::cusolver)

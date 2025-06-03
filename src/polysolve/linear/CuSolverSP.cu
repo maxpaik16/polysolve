@@ -1,7 +1,7 @@
 #ifdef POLYSOLVE_WITH_CUSOLVER
 
 ////////////////////////////////////////////////////////////////////////////////
-#include "CuSolverDN.cuh"
+#include "CuSolvSP.cuh"
 
 #include <Eigen/Dense>
 #include <Eigen/Core>
@@ -91,33 +91,33 @@ namespace polysolve::linear
     } // namespace
 
     template <typename T>
-    CuSolverDN<T>::CuSolverDN()
+    CuSolvSP<T>::CuSolverSP()
     {
         init();
     }
 
     template <typename T>
-    void CuSolverDN<T>::init()
+    void CuSolverSP<T>::init()
     {
-        cusolverDnCreate(&cuHandle);
-        cusolverDnCreateParams(&cuParams);
+        cusolverSpCreate(&cuHandle);
+        cusolverSpCreateParams(&cuParams);
         cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-        cusolverDnSetStream(cuHandle, stream);
+        cusolverSpSetStream(cuHandle, stream);
     }
 
     template <typename T>
-    void CuSolverDN<T>::get_info(json &params) const
+    void CuSolverSP<T>::get_info(json &params) const
     {
     }
 
     template <typename T>
-    void CuSolverDN<T>::factorize(const StiffnessMatrix &A)
+    void CuSolverSP<T>::factorize(const StiffnessMatrix &A)
     {
         factorize_dense(Eigen::MatrixXd(A));
     }
 
     template <typename T>
-    void CuSolverDN<T>::factorize_dense(const Eigen::MatrixXd &A)
+    void CuSolverSP<T>::factorize_dense(const Eigen::MatrixXd &A)
     {
         numrows = (int)A.rows();
 
@@ -153,7 +153,7 @@ namespace polysolve::linear
     }
 
     template <typename T>
-    void CuSolverDN<T>::solve(const Ref<const VectorXd> b, Ref<VectorXd> x)
+    void CuSolverSP<T>::solve(const Ref<const VectorXd> b, Ref<VectorXd> x)
     {
         // copy b to device
         if (!d_b_alloc)
@@ -182,7 +182,7 @@ namespace polysolve::linear
     ////////////////////////////////////////////////////////////////////////////////
 
     template <typename T>
-    CuSolverDN<T>::~CuSolverDN()
+    CuSolverSP<T>::~CuSolverSP()
     {
         if (d_A_alloc)
         {
@@ -194,8 +194,8 @@ namespace polysolve::linear
             gpuErrchk(cudaFree(d_info));
         }
 
-        cusolverDnDestroyParams(cuParams);
-        cusolverDnDestroy(cuHandle);
+        cusolverSpDestroyParams(cuParams);
+        cusolverSpDestroy(cuHandle);
         cudaStreamDestroy(stream);
 
         if (d_b_alloc)
@@ -206,7 +206,7 @@ namespace polysolve::linear
 
 } // namespace polysolve::linear
 
-template polysolve::linear::CuSolverDN<double>::CuSolverDN();
-template polysolve::linear::CuSolverDN<float>::CuSolverDN();
+template polysolve::linear::CuSolverSP<double>::CuSolverDN();
+template polysolve::linear::CuSolverSP<float>::CuSolverDN();
 
 #endif
