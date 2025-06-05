@@ -410,6 +410,41 @@ TEST_CASE("amgcl_initial_guess", "[solver]")
     REQUIRE(err < 1e-8);
 }
 
+
+TEST_CASE("julia", "[solver]")
+{
+    std::unique_ptr<Solver> solver;
+
+    try
+    {
+        solver = Solver::create("Julia", "");
+    }
+    catch (const std::exception &)
+    {
+        return;
+    }
+    const std::string path = POLYFEM_DATA_DIR;
+    Eigen::SparseMatrix<double> A;
+    const bool ok = loadMarket(A, path + "/A_2.mat");
+    REQUIRE(ok);
+
+    // solver->set_parameters(params);
+    Eigen::VectorXd b(A.rows());
+    b.setRandom();
+    Eigen::VectorXd x(b.size());
+    x.setZero();
+
+    solver->analyze_pattern(A, A.rows());
+    solver->factorize(A);
+    solver->solve(b, x);
+
+    // solver->get_info(solver_info);
+
+    // std::cout<<"Solver error: "<<x<<std::endl;
+    const double err = (A * x - b).norm();
+    REQUIRE(err < 1e-8);
+}
+
 TEST_CASE("saddle_point_test", "[solver]")
 {
 #ifdef WIN32

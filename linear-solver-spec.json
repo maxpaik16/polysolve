@@ -15,7 +15,8 @@
             "Eigen::MINRES",
             "Pardiso",
             "Hypre",
-            "AMGCL"
+            "AMGCL",
+            "Julia"
         ],
         "doc": "Settings for the linear solver."
     },
@@ -47,7 +48,8 @@
             "Eigen::ConjugateGradient",
             "Eigen::BiCGSTAB",
             "Eigen::GMRES",
-            "Eigen::MINRES"
+            "Eigen::MINRES",
+            "Julia"
         ]
     },
     {
@@ -152,6 +154,15 @@
             "precond"
         ],
         "doc": "Settings for the AMGCL solver."
+    },
+    {
+        "pointer": "/Julia",
+        "default": null,
+        "type": "object",
+        "optional": [
+            "options"
+        ],
+        "doc": "Settings for the Julia solver."
     },
     {
         "pointer": "/Eigen::LeastSquaresConjugateGradient/max_iter",
@@ -421,5 +432,11 @@
         "default": 0,
         "type": "float",
         "doc": "Aggregation epsilon strong."
+    },
+    {
+        "pointer": "/Julia/options",
+        "default": "",
+        "type": "string",
+        "doc": "Options for solver to pass to Julia."
     }
 ]

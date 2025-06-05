@@ -65,6 +65,8 @@ namespace polysolve::linear {
 #endif
 #include <unsupported/Eigen/IterativeSolvers>
 
+#include "JuliaSolver.hpp"
+
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace polysolve::linear
@@ -411,6 +413,10 @@ namespace polysolve::linear
         {
             return std::make_unique<AMGCL>();
 #endif
+        }        
+else if (solver == "Julia")
+        {
+            return std::make_unique<JuliaSolver>();
 #if EIGEN_VERSION_AT_LEAST(3, 3, 0)
             // Available only with Eigen 3.3.0 and newer
 #ifndef POLYSOLVE_LARGE_INDEX
