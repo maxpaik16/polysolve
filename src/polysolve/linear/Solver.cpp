@@ -560,7 +560,8 @@ else if (solver == "Julia")
             "Eigen::FullPivHouseholderQR",
             "Eigen::CompleteOrthogonalDecomposition",
             "Eigen::LLT",
-            "Eigen::LDLT"
+            "Eigen::LDLT",
+            "Julia"
             // "Eigen::BDCSVD",
             // "Eigen::JacobiSVD"
         }};

@@ -3,6 +3,7 @@
 #include "JuliaSolver.hpp"
 
 #include <fstream>
+#include <iostream>
 #include <cstdlib>
 #include <iomanip>
 #include <filesystem>
@@ -16,7 +17,9 @@ namespace polysolve::linear
 
     JuliaSolver::JuliaSolver()
     {
+        std::cout << "CREATING JULIA SOLVER" << std::endl;
         julia_thread = std::thread(JuliaSolver::launch_julia_program);
+        julia_thread.detach();
     }
 
     // Set solver parameters
