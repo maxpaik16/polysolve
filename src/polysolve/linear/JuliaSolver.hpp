@@ -4,7 +4,7 @@
 #include "Solver.hpp"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
-#include <vector>
+#include <thread>
 
 
 namespace polysolve::linear
@@ -40,14 +40,16 @@ namespace polysolve::linear
         // Name of the solver type (for debugging purposes)
         virtual std::string name() const override { return "Julia"; }
 
-    protected:
-        std::string options;
-        int num_iterations;
-        double final_res_norm;
+        static void launch_julia_program();
 
     private:
         bool has_matrix_ = false;
         StiffnessMatrix A_;
+
+        std::string options;
+        double final_res_norm;
+
+        std::thread julia_thread;
     };
 
 } // namespace polysolve::linear

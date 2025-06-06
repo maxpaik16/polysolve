@@ -5,6 +5,8 @@
 #include <fstream>
 #include <cstdlib>
 #include <iomanip>
+#include <filesystem>
+#include <unistd.h>
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace polysolve::linear
@@ -14,7 +16,7 @@ namespace polysolve::linear
 
     JuliaSolver::JuliaSolver()
     {
-        
+        julia_thread = std::thread(JuliaSolver::launch_julia_program);
     }
 
     // Set solver parameters
@@ -31,7 +33,6 @@ namespace polysolve::linear
 
     void JuliaSolver::get_info(json &params) const
     {
-        params["num_iterations"] = num_iterations;
         params["final_res_norm"] = final_res_norm;
     }
 
@@ -45,6 +46,10 @@ namespace polysolve::linear
 
     void JuliaSolver::solve(const Eigen::Ref<const VectorXd> rhs, Eigen::Ref<VectorXd> result)
     {
+        std::ofstream options_file("cudss_options.txt");
+        options_file << options;
+        options_file.close();
+
         int nnz = A_.nonZeros();
 
         std::ofstream colptr_file("cudss_colptr.txt");
@@ -72,7 +77,14 @@ namespace polysolve::linear
         rhs_file << std::setprecision(12) << rhs;
         rhs_file.close();
 
-        int julia_ret_code = system("julia --project dump_cudss.jl");
+        //TODO send solve signal to julia and wait for response
+        std::ofstream start_file("cudss_start.txt");
+        start_file.close();
+
+        while (std::filesystem::exists("cudss_start.txt"))
+        {
+            sleep(0.01);
+        }
 
         std::ifstream solution_file("cudss_solution.txt");
         int i = 0;
@@ -82,6 +94,11 @@ namespace polysolve::linear
             result(i++) = value;
         }
         solution_file.close();
+    }
+
+    void JuliaSolver::launch_julia_program()
+    {
+        int julia_ret_code = system("julia --project dump_cudss.jl");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
