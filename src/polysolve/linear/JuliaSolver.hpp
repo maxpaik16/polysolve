@@ -49,7 +49,8 @@ namespace polysolve::linear
         std::string options;
         double final_res_norm;
 
-        std::thread julia_thread;
+        static std::thread julia_thread;
+        static int num_instances;
     };
 
 } // namespace polysolve::linear

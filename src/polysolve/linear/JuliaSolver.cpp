@@ -12,14 +12,19 @@
 
 namespace polysolve::linear
 {
+    int JuliaSolver::num_instances = 0;
+    std::thread JuliaSolver::julia_thread;
 
     ////////////////////////////////////////////////////////////////////////////////
 
     JuliaSolver::JuliaSolver()
     {
-        std::cout << "CREATING JULIA SOLVER" << std::endl;
-        julia_thread = std::thread(JuliaSolver::launch_julia_program);
-        julia_thread.detach();
+        if (num_instances == 0)
+        {
+            JuliaSolver::julia_thread = std::thread(JuliaSolver::launch_julia_program);
+            JuliaSolver::julia_thread.detach();
+        }
+        ++num_instances;
     }
 
     // Set solver parameters
@@ -80,7 +85,6 @@ namespace polysolve::linear
         rhs_file << std::setprecision(12) << rhs;
         rhs_file.close();
 
-        //TODO send solve signal to julia and wait for response
         std::ofstream start_file("cudss_start.txt");
         start_file.close();
 
@@ -108,8 +112,12 @@ namespace polysolve::linear
 
     JuliaSolver::~JuliaSolver()
     {
-        std::ofstream end_file("cudss_end.txt");
-        end_file.close();
+        --num_instances;
+        if (num_instances == 0)
+        {
+            std::ofstream end_file("cudss_end.txt");
+            end_file.close();
+        }
         if (has_matrix_)
         {
             has_matrix_ = false;
