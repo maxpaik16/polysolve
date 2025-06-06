@@ -19,12 +19,12 @@ namespace polysolve::linear
 
     JuliaSolver::JuliaSolver()
     {
-        if (num_instances == 0)
+        if (JuliaSolver::num_instances == 0)
         {
             JuliaSolver::julia_thread = std::thread(JuliaSolver::launch_julia_program);
             JuliaSolver::julia_thread.detach();
         }
-        ++num_instances;
+        ++JuliaSolver::num_instances;
     }
 
     // Set solver parameters
@@ -112,8 +112,8 @@ namespace polysolve::linear
 
     JuliaSolver::~JuliaSolver()
     {
-        --num_instances;
-        if (num_instances == 0)
+        --JuliaSolver::num_instances;
+        if (JuliaSolver::num_instances == 0)
         {
             std::ofstream end_file("cudss_end.txt");
             end_file.close();
