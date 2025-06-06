@@ -435,7 +435,7 @@
     },
     {
         "pointer": "/Julia/options",
-        "default": "",
+        "default": "LU",
         "type": "string",
         "doc": "Options for solver to pass to Julia."
     }

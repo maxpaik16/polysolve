@@ -105,6 +105,8 @@ namespace polysolve::linear
 
     JuliaSolver::~JuliaSolver()
     {
+        std::ofstream end_file("cudss_end.txt");
+        end_file.close();
         if (has_matrix_)
         {
             has_matrix_ = false;
