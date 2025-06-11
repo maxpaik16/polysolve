@@ -12,19 +12,19 @@
 
 namespace polysolve::linear
 {
-    int JuliaSolver::num_instances = 0;
+    bool JuliaSolver::julia_thread_launched = false;
     std::thread JuliaSolver::julia_thread;
 
     ////////////////////////////////////////////////////////////////////////////////
 
     JuliaSolver::JuliaSolver()
     {
-        if (JuliaSolver::num_instances == 0)
+        if (!JuliaSolver::julia_thread_launched)
         {
+            JuliaSolver::julia_thread_launched = true;
             JuliaSolver::julia_thread = std::thread(JuliaSolver::launch_julia_program);
             JuliaSolver::julia_thread.detach();
         }
-        ++JuliaSolver::num_instances;
     }
 
     // Set solver parameters
@@ -63,26 +63,26 @@ namespace polysolve::linear
         std::ofstream colptr_file("cudss_colptr.txt");
         for (int i = 0; i < rhs.size() + 1; ++i)
         {
-            colptr_file << std::setprecision(12) << A_.outerIndexPtr()[i] << std::endl;
+            colptr_file << std::setprecision(16) << A_.outerIndexPtr()[i] << std::endl;
         }
         colptr_file.close();
 
         std::ofstream rowval_file("cudss_rowval.txt");
         for (int i = 0; i < nnz; ++i)
         {
-            rowval_file << std::setprecision(12) << A_.innerIndexPtr()[i] << std::endl;
+            rowval_file << std::setprecision(16) << A_.innerIndexPtr()[i] << std::endl;
         }
         rowval_file.close();
 
         std::ofstream nzval_file("cudss_nzval.txt");
         for (int i = 0; i < nnz; ++i)
         {
-            nzval_file << std::setprecision(12) << A_.valuePtr()[i] << std::endl;
+            nzval_file << std::setprecision(16) << A_.valuePtr()[i] << std::endl;
         }
         nzval_file.close();
 
         std::ofstream rhs_file("cudss_rhs.txt");
-        rhs_file << std::setprecision(12) << rhs;
+        rhs_file << std::setprecision(16) << rhs;
         rhs_file.close();
 
         std::ofstream start_file("cudss_start.txt");
@@ -96,7 +96,7 @@ namespace polysolve::linear
         std::ifstream solution_file("cudss_solution.txt");
         int i = 0;
         double value;
-        while (solution_file >> std::setprecision(12) >> value)
+        while (solution_file >> std::setprecision(16) >> value)
         {
             result(i++) = value;
         }
@@ -112,12 +112,6 @@ namespace polysolve::linear
 
     JuliaSolver::~JuliaSolver()
     {
-        --JuliaSolver::num_instances;
-        if (JuliaSolver::num_instances == 0)
-        {
-            std::ofstream end_file("cudss_end.txt");
-            end_file.close();
-        }
         if (has_matrix_)
         {
             has_matrix_ = false;

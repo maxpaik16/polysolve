@@ -50,7 +50,7 @@ namespace polysolve::linear
         double final_res_norm;
 
         static std::thread julia_thread;
-        static int num_instances;
+        static bool julia_thread_launched;
     };
 
 } // namespace polysolve::linear
