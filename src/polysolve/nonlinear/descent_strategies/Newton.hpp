@@ -96,6 +96,8 @@ namespace polysolve::nonlinear
         void compute_hessian(Problem &objFunc,
                              const TVector &x,
                              Eigen::MatrixXd &hessian) override;
+
+        bool compare_to_full = false;
     };
 
     class RegularizedNewton : public Newton

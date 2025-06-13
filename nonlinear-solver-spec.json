@@ -295,7 +295,8 @@
             "type"
         ],
         "optional": [
-            "residual_tolerance"
+            "residual_tolerance",
+            "compare_to_full"
         ],
         "doc": "Options for projected Newton."
     },
@@ -482,6 +483,12 @@
         "default": 1e-5,
         "type": "float",
         "doc": "Tolerance of the linear system residual. If residual is above, the direction is rejected."
+    },
+    {
+        "pointer": "/solver/ProjectedNewton/compare_to_full",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to compare projected Hessian to full Hessian"
     },
     {
         "pointer": "/solver/*/reg_weight_min",

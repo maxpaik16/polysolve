@@ -2,6 +2,8 @@
 
 #include <polysolve/Utils.hpp>
 
+#include <Eigen/SVD>
+
 #if defined(SPDLOG_FMT_EXTERNAL)
 #include <fmt/color.h>
 #else
@@ -89,7 +91,7 @@ namespace polysolve::nonlinear
         const json &linear_solver_params,
         const double characteristic_length,
         spdlog::logger &logger)
-        : Superclass(sparse, extract_param("ProjectedNewton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger)
+        : Superclass(sparse, extract_param("ProjectedNewton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger), compare_to_full(extract_param("ProjectedNewton", "compare_to_full", solver_params))
     {
     }
 
@@ -261,6 +263,21 @@ namespace polysolve::nonlinear
     {
         objFunc.set_project_to_psd(true);
         objFunc.hessian(x, hessian);
+
+        if (compare_to_full)
+        {
+            polysolve::StiffnessMatrix full_hessian;
+            objFunc.set_project_to_psd(false);
+            objFunc.hessian(x, full_hessian);
+
+            polysolve::StiffnessMatrix diff_hessian = full_hessian - hessian;
+        
+            Eigen::JacobiSVD<Eigen::MatrixXd> svd(diff_hessian); 
+            Eigen::VectorXd singularValues = svd.singularValues(); 
+            double largestSingularValue = singularValues(0); 
+
+            m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
+        }
     }
 
     void RegularizedNewton::compute_hessian(Problem &objFunc,
@@ -297,6 +314,21 @@ namespace polysolve::nonlinear
     {
         objFunc.set_project_to_psd(true);
         objFunc.hessian(x, hessian);
+
+        if (compare_to_full)
+        {
+            Eigen::MatrixXd full_hessian;
+            objFunc.set_project_to_psd(false);
+            objFunc.hessian(x, full_hessian);
+
+            Eigen::MatrixXd diff_hessian = full_hessian - hessian;
+        
+            Eigen::JacobiSVD<Eigen::MatrixXd> svd(diff_hessian); 
+            Eigen::VectorXd singularValues = svd.singularValues(); 
+            double largestSingularValue = singularValues(0); 
+
+            m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
+        }
     }
 
     void RegularizedNewton::compute_hessian(Problem &objFunc,
