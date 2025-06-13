@@ -23,6 +23,7 @@ namespace polysolve::nonlinear
         // Copies stuff from main newton
         json proj_solver_params = R"({"ProjectedNewton": {}})"_json;
         proj_solver_params["ProjectedNewton"]["residual_tolerance"] = solver_params["Newton"]["residual_tolerance"];
+        proj_solver_params["ProjectedNewton"]["compare_to_full"] = solver_params["Newton"]["compare_to_full"];
 
         json reg_solver_params = R"({"RegularizedNewton": {}})"_json;
         reg_solver_params["RegularizedNewton"]["residual_tolerance"] = solver_params["Newton"]["residual_tolerance"];
