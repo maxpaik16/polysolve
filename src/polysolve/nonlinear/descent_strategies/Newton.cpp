@@ -92,7 +92,7 @@ namespace polysolve::nonlinear
         const json &linear_solver_params,
         const double characteristic_length,
         spdlog::logger &logger)
-        : Superclass(sparse, extract_param("ProjectedNewton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger), compare_to_full(extract_param("ProjectedNewton", "compare_to_full", solver_params))
+        : Superclass(sparse, extract_param("ProjectedNewton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger), compare_to_full(solver_params["ProjectedNewton"]["compare_to_full"])
     {
     }
 
