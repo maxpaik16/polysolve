@@ -10,6 +10,11 @@
 #include <spdlog/fmt/bundled/color.h>
 #endif
 
+#include <GenEigsSolver.h>
+#include <SymEigsSolver.h>
+#include <MatOp/SparseGenMatProd.h>
+#include <MatOp/DenseSymMatProd.h>
+
 namespace polysolve::nonlinear
 {
 
@@ -272,10 +277,18 @@ namespace polysolve::nonlinear
             objFunc.hessian(x, full_hessian);
 
             polysolve::StiffnessMatrix diff_hessian = full_hessian - hessian;
+            Eigen::MatrixXd HTH = diff_hessian.transpose() * diff_hessian;
+
+            Spectra::DenseSymMatProd<double> op(HTH);
+            Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN, Spectra::DenseSymMatProd<double>> eigs(&op, 1, 6);
+
+            eigs.init();
+            int nconv = eigs.compute();
+            Eigen::VectorXd eigenvalues;
+            if (eigs.info() == Spectra::SUCCESSFUL)
+                eigenvalues = eigs.eigenvalues();
         
-            Eigen::JacobiSVD<Eigen::MatrixXd> svd(diff_hessian); 
-            Eigen::VectorXd singularValues = svd.singularValues(); 
-            double largestSingularValue = singularValues(0); 
+            double largestSingularValue = eigenvalues(0); 
 
             m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
         }
@@ -323,10 +336,18 @@ namespace polysolve::nonlinear
             objFunc.hessian(x, full_hessian);
 
             Eigen::MatrixXd diff_hessian = full_hessian - hessian;
+            Eigen::MatrixXd HTH = diff_hessian.transpose() * diff_hessian;
+
+            Spectra::DenseSymMatProd<double> op(HTH);
+            Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN, Spectra::DenseSymMatProd<double>> eigs(&op, 1, 6);
+
+            eigs.init();
+            int nconv = eigs.compute();
+            Eigen::VectorXd eigenvalues;
+            if (eigs.info() == Spectra::SUCCESSFUL)
+                eigenvalues = eigs.eigenvalues();
         
-            Eigen::JacobiSVD<Eigen::MatrixXd> svd(diff_hessian); 
-            Eigen::VectorXd singularValues = svd.singularValues(); 
-            double largestSingularValue = singularValues(0); 
+            double largestSingularValue = eigenvalues(0); 
 
             m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
         }
