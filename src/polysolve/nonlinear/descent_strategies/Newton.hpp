@@ -35,6 +35,7 @@ namespace polysolve::nonlinear
                spdlog::logger &logger);
 
         std::string name() const override { return internal_name() + "Newton"; }
+        bool dump_linear_systems = false;
 
     private:
         double solve_sparse_linear_system(Problem &objFunc,

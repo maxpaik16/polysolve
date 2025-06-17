@@ -14,6 +14,7 @@
 #include <SymEigsSolver.h>
 #include <MatOp/SparseGenMatProd.h>
 #include <MatOp/DenseSymMatProd.h>
+#include <fstream>
 
 namespace polysolve::nonlinear
 {
@@ -29,6 +30,7 @@ namespace polysolve::nonlinear
         json proj_solver_params = R"({"ProjectedNewton": {}})"_json;
         proj_solver_params["ProjectedNewton"]["residual_tolerance"] = solver_params["Newton"]["residual_tolerance"];
         proj_solver_params["ProjectedNewton"]["compare_to_full"] = solver_params["Newton"]["compare_to_full"];
+        proj_solver_params["ProjectedNewton"]["dump_linear_systems"] = solver_params["Newton"]["dump_linear_systems"];
 
         json reg_solver_params = R"({"RegularizedNewton": {}})"_json;
         reg_solver_params["RegularizedNewton"]["residual_tolerance"] = solver_params["Newton"]["residual_tolerance"];
@@ -71,7 +73,7 @@ namespace polysolve::nonlinear
                    const double characteristic_length,
                    spdlog::logger &logger)
         : Superclass(solver_params, characteristic_length, logger),
-          is_sparse(sparse), characteristic_length(characteristic_length), residual_tolerance(residual_tolerance)
+          is_sparse(sparse), characteristic_length(characteristic_length), residual_tolerance(residual_tolerance), dump_linear_systems(solver_params["Newton"]["dump_linear_systems"])
     {
         linear_solver = polysolve::linear::Solver::create(linear_solver_params, logger);
         if (linear_solver->is_dense() == sparse)
@@ -180,6 +182,14 @@ namespace polysolve::nonlinear
         {
             POLYSOLVE_SCOPED_STOPWATCH("assembly time", this->assembly_time, m_logger);
             compute_hessian(objFunc, x, hessian);
+        }
+
+        if (dump_linear_systems)
+        {
+            std::ofstream file("rhs.mat", std::ios_base::app);
+            file << (-grad).transpose();
+            file << std::endl;
+            file.close();
         }
 
         {
@@ -291,6 +301,47 @@ namespace polysolve::nonlinear
             double largestSingularValue = eigenvalues(0); 
 
             m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
+
+            if (dump_linear_systems)
+            {
+                std::vector<Eigen::Triplet<double>> triplets;
+                triplets.reserve(full_hessian.nonZeros());
+                for (int k = 0; k < full_hessian.outerSize(); ++k)
+                {
+                    for (polysolve::StiffnessMatrix::InnerIterator it(full_hessian, k); it; ++it)
+                    {   
+                        triplets.push_back(Eigen::Triplet<double>(it.row(), it.col(), it.value()));
+                    }
+                }
+
+                std::ofstream file("A.mat", std::ios_base::app);
+                file << full_hessian.rows() << " " << full_hessian.cols() << " " << full_hessian.nonZeros() << std::endl;
+                for (auto &trip : triplets)
+                {
+                    file << trip.row() << " " << trip.col() << " " << trip.value() << " ";
+                }
+                file << std::endl;
+                file.close();
+
+                std::vector<Eigen::Triplet<double>> projtriplets;
+                projtriplets.reserve(hessian.nonZeros());
+                for (int k = 0; k < hessian.outerSize(); ++k)
+                {
+                    for (polysolve::StiffnessMatrix::InnerIterator it(hessian, k); it; ++it)
+                    {   
+                        projtriplets.push_back(Eigen::Triplet<double>(it.row(), it.col(), it.value()));
+                    }
+                }
+
+                std::ofstream projfile("projA.mat", std::ios_base::app);
+                projfile << hessian.rows() << " " << hessian.cols() << " " << hessian.nonZeros() << std::endl;
+                for (auto &trip : projtriplets)
+                {
+                    projfile << trip.row() << " " << trip.col() << " " << trip.value() << " ";
+                }
+                projfile << std::endl;
+                projfile.close();
+            }
         }
     }
 
