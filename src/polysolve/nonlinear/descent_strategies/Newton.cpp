@@ -304,16 +304,9 @@ namespace polysolve::nonlinear
 
             m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
 
-            Spectra::SparseSymMatProd<double> full_op(full_hessian);
-            Spectra::SymEigsSolver<double, Spectra::BOTH_ENDS, Spectra::SparseSymMatProd<double>> full_eigs(&full_op, 2, 6);
-
-            full_eigs.init();
-            int fullnconv = full_eigs.compute();
-            Eigen::VectorXd full_eigenvalues;
-            if (full_eigs.info() == Spectra::SUCCESSFUL)
-                full_eigenvalues = full_eigs.eigenvalues();
-        
-            m_logger.trace("Largest and smallest eigenvalues: {}, {}", full_eigenvalues(0), full_eigenvalues(1));
+            Eigen::SimplicialLDLT<polysolve::StiffnessMatrix> chol_decomp(full_hessian);
+            bool spd = !(chol_decomp.info() == Eigen::NumericalIssue);
+            m_logger.trace("Hessian isSPD: {}", spd);
 
             std::vector<Eigen::Triplet<double>> full_triplets;
             std::vector<double> proj_values;
