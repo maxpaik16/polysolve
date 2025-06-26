@@ -14,6 +14,7 @@
 #include <SymEigsSolver.h>
 #include <MatOp/SparseGenMatProd.h>
 #include <MatOp/DenseSymMatProd.h>
+#include <MatOp/SparseSymMatProd.h>
 #include <fstream>
 
 namespace polysolve::nonlinear
@@ -73,7 +74,7 @@ namespace polysolve::nonlinear
                    const double characteristic_length,
                    spdlog::logger &logger)
         : Superclass(solver_params, characteristic_length, logger),
-          is_sparse(sparse), characteristic_length(characteristic_length), residual_tolerance(residual_tolerance), dump_linear_systems(solver_params["Newton"]["dump_linear_systems"])
+          is_sparse(sparse), characteristic_length(characteristic_length), residual_tolerance(residual_tolerance)
     {
         linear_solver = polysolve::linear::Solver::create(linear_solver_params, logger);
         if (linear_solver->is_dense() == sparse)
@@ -101,6 +102,7 @@ namespace polysolve::nonlinear
         spdlog::logger &logger)
         : Superclass(sparse, extract_param("ProjectedNewton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger), compare_to_full(solver_params["ProjectedNewton"]["compare_to_full"])
     {
+        dump_linear_systems = solver_params["ProjectedNewton"]["dump_linear_systems"];
     }
 
     RegularizedNewton::RegularizedNewton(
@@ -301,6 +303,41 @@ namespace polysolve::nonlinear
             double largestSingularValue = eigenvalues(0); 
 
             m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
+
+            Spectra::SparseSymMatProd<double> full_op(full_hessian);
+            Spectra::SymEigsSolver<double, Spectra::BOTH_ENDS, Spectra::SparseSymMatProd<double>> full_eigs(&full_op, 2, 6);
+
+            full_eigs.init();
+            int fullnconv = full_eigs.compute();
+            Eigen::VectorXd full_eigenvalues;
+            if (full_eigs.info() == Spectra::SUCCESSFUL)
+                full_eigenvalues = full_eigs.eigenvalues();
+        
+            m_logger.trace("Largest and smallest eigenvalues: {}, {}", full_eigenvalues(0), full_eigenvalues(1));
+
+            std::vector<Eigen::Triplet<double>> full_triplets;
+            std::vector<double> proj_values;
+            full_triplets.reserve(full_hessian.nonZeros());
+            proj_values.reserve(full_hessian.nonZeros());
+            for (int k = 0; k < full_hessian.outerSize(); ++k)
+            {
+                for (polysolve::StiffnessMatrix::InnerIterator it(full_hessian, k); it; ++it)
+                {   
+                    full_triplets.push_back(Eigen::Triplet<double>(it.row(), it.col(), it.value()));
+                    proj_values.push_back(hessian.coeff(it.row(), it.col()));
+                }
+            }
+            
+                std::ofstream compfile("hessian.mat", std::ios_base::app);
+                compfile << full_hessian.rows() << " " << full_hessian.cols() << " " << full_hessian.nonZeros() << std::endl;
+                for (int i = 0; i < full_hessian.nonZeros(); ++i)
+                {
+                    auto trip = full_triplets[i];
+                    double val = proj_values[i];
+                    compfile << trip.row() << " " << trip.col() << " " << trip.value() << " " << val << " ";
+                }
+                compfile << std::endl;
+                compfile.close();
 
             if (dump_linear_systems)
             {
