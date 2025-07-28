@@ -8,6 +8,12 @@
 #include <spdlog/fmt/bundled/color.h>
 #endif
 
+#include <GenEigsSolver.h>
+#include <SymEigsSolver.h>
+#include <MatOp/SparseGenMatProd.h>
+#include <MatOp/DenseSymMatProd.h>
+#include <MatOp/SparseSymMatProd.h>
+
 namespace polysolve::nonlinear
 {
 
@@ -156,7 +162,7 @@ namespace polysolve::nonlinear
         if (std::isnan(residual) || residual > current_residual_tolerance)
         {
             m_logger.debug("[{}] large (or nan) linear solve residual {}>{} (‖∇f‖={})",
-                           name(), residual, current_residual_tolerance, objFunc.grad_norm(grad, norm_type));
+                           name(), residual, residual_tolerance * characteristic_length, grad.norm());
 
             return false;
         }
