@@ -36,6 +36,7 @@ namespace polysolve::nonlinear
         reg_solver_params["RegularizedNewton"]["reg_weight_min"] = solver_params["Newton"]["reg_weight_min"];
         reg_solver_params["RegularizedNewton"]["reg_weight_max"] = solver_params["Newton"]["reg_weight_max"];
         reg_solver_params["RegularizedNewton"]["reg_weight_inc"] = solver_params["Newton"]["reg_weight_inc"];
+        reg_solver_params["RegularizedNewton"]["compare_to_full"] = solver_params["Newton"]["compare_to_full"];
 
         std::vector<std::shared_ptr<DescentStrategy>> res;
         const bool force_psd_projection = solver_params["Newton"]["force_psd_projection"];
@@ -336,6 +337,34 @@ namespace polysolve::nonlinear
         if (reg_weight > 0)
         {
             hessian += reg_weight * sparse_identity(hessian.rows(), hessian.cols());
+        }
+
+                if (compare_to_full)
+        {
+            polysolve::StiffnessMatrix full_hessian;
+            objFunc.set_project_to_psd(false);
+            objFunc.hessian(x, full_hessian);
+
+            polysolve::StiffnessMatrix diff_hessian = full_hessian - hessian;
+            Eigen::MatrixXd HTH = diff_hessian.transpose() * diff_hessian;
+
+            Spectra::DenseSymMatProd<double> op(HTH);
+            Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN, Spectra::DenseSymMatProd<double>> eigs(&op, 1, 6);
+
+            eigs.init();
+            int nconv = eigs.compute();
+            Eigen::VectorXd eigenvalues;
+            if (eigs.info() == Spectra::SUCCESSFUL)
+                eigenvalues = eigs.eigenvalues();
+
+            double largestSingularValue = eigenvalues(0); 
+
+            m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
+
+            Eigen::SimplicialLDLT<polysolve::StiffnessMatrix> chol_decomp(full_hessian);
+            bool spd = !(chol_decomp.info() == Eigen::NumericalIssue);
+            m_logger.trace("Hessian isSPD: {}", spd);
+
         }
     }
 
