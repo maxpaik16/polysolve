@@ -490,6 +490,8 @@ namespace polysolve::nonlinear
                 x = x1;
             }
 
+            m_strategies[m_descent_strategy]->handle_success();
+
             old_energy = energy;
 
             // Reset this for the next iterations
