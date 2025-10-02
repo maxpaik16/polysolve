@@ -287,11 +287,17 @@ namespace polysolve::nonlinear
         StopWatch stop_watch("nonlinear solver", total_time, m_logger);
         stop_watch.start();
 
+        if (normalize_energy)
+        {
+            objFunc.weight = objFunc(x);
+        }
+
         m_logger.debug(
             "Starting {} with {} solve {}={:g} (stopping criteria: {})",
             descent_strategy_name(), m_line_search->name(), log::f0(), objFunc(x), m_stop_rescaled.print_message());
 
         update_solver_info(objFunc(x));
+
         objFunc.post_step(PostStepData(m_current.iterations, solver_info, x, grad));
 
         double initial_grad_norm;
