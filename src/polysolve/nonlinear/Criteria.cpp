@@ -10,6 +10,7 @@ namespace polysolve::nonlinear
     bool is_converged_status(const Status s)
     {
         return s == Status::XDeltaTolerance || s == Status::FDeltaTolerance || s == Status::GradNormTolerance || s == Status::NewtonDecrementTolerance || s == Status::RelGradNormTolerance || s == Status::RelXDeltaTolerance;
+        return s == Status::XDeltaTolerance || s == Status::FDeltaTolerance || s == Status::GradNormTolerance || s == Status::NewtonDecrementTolerance || s == Status::RelGradNormTolerance || s == Status::RelXDeltaTolerance;
     }
 
     Criteria::Criteria()

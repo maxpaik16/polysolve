@@ -371,15 +371,22 @@ namespace polysolve::nonlinear
                 update_direction_successful = compute_update_direction(objFunc, x, grad, delta_x);
             }
 
-            m_current.xDelta = objFunc.step_norm(delta_x, m_norm_type);
+            m_current.xDelta = objFunc.step_norm(delta_x, norm_type_);
             if (m_current.iterations == 0)
             {
                 initial_delta_x_norm = m_current.xDelta;
-                m_current.relXDelta = NaN;
             }
             else
             {
                 m_current.relXDelta = m_current.xDelta / initial_delta_x_norm;
+            }
+
+            if (m_stop_rescaled.newtonDecrement > 0)
+            {
+                polysolve::StiffnessMatrix hessian;
+                objFunc.set_project_to_psd(false);
+                objFunc.hessian(x, hessian);
+                m_current.newtonDecrement = 0.5 * delta_x.transpose() * hessian * delta_x;
             }
 
             if (!update_direction_successful || std::isnan(m_current.xDelta))
