@@ -237,6 +237,12 @@ namespace polysolve::nonlinear
             linear_solver->reduced_to_full_func = objFunc.reduced_to_full_func;
         }
 
+        Eigen::DiagonalMatrix<double, Eigen::Dynamic> M_inv_sqrt = objFunc.current_lumped_mass().inverse();
+        for (int i = 0; i < M_inv_sqrt.rows(); ++i)
+        {
+            M_inv_sqrt.diagonal()(i) = std::sqrt(M_inv_sqrt.diagonal()(i));
+        }
+
         {
             POLYSOLVE_SCOPED_STOPWATCH("linear solve", this->inverting_time, m_logger);
             if (use_adaptive_residual_tolerance)
@@ -248,7 +254,7 @@ namespace polysolve::nonlinear
 
             try
             {
-                linear_solver->factorize(hessian);
+                linear_solver->factorize(M_inv_sqrt * hessian);
             }
             catch (const std::runtime_error &err)
             {
@@ -258,7 +264,7 @@ namespace polysolve::nonlinear
                 // Eigen::saveMarket(hessian, "problematic_hessian.mtx");
                 return std::nan("");
             }
-            linear_solver->solve(-grad, direction); // H Δx = -g
+            linear_solver->solve(-1 * M_inv_sqrt * grad, direction); // H Δx = -g
         }
 
         const double residual = objFunc.grad_norm(hessian * direction + grad, norm_type); // H Δx + g = 0
