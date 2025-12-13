@@ -8,7 +8,7 @@
 #include <vector>
 #include <deque>
 #include <Eigen/SparseCholesky>
-#include <Eigen/PardisoSupport>
+//#include <Eigen/PardisoSupport>
 
 #include <HYPRE_utilities.h>
 #include <HYPRE.h>
@@ -116,6 +116,10 @@ namespace polysolve::linear
         bool use_minres = false;
         int m_ = 10;
         int amg_iters = 1;
+        bool problematic_subdomain_precond_only = false;
+        bool jacobi_precond = false;
+        bool use_problematic_subdomain_for_initial_guess = false;
+        bool decompose_subdomains = false;
 
         int project_d_option = 0;
 
@@ -133,7 +137,7 @@ namespace polysolve::linear
         int start_i, end_i;
 
         Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_A;
-        std::deque<Eigen::PardisoLDLT<Eigen::SparseMatrix<double>>> D_solvers;
+        std::deque<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>> D_solvers;
 
         std::vector<std::vector<int>> bad_indices_arrays;
         std::vector<std::unordered_map<int, int>> index_mappings;

@@ -481,7 +481,11 @@
             "use_minres",
             "m",
             "amg_iters",
-            "project_d_option"
+            "project_d_option",
+            "problematic_subdomain_precond_only",
+            "jacobi_precond",
+            "use_problematic_subdomain_for_initial_guess",
+            "decompose_subdomains"
         ],
         "doc": "Settings for the Experimental solver."
     },

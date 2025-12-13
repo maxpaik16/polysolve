@@ -171,6 +171,22 @@ namespace polysolve::linear
             {
                 project_d_option = params["Experimental"]["project_d_option"];
             }
+            if (params["Experimental"].contains("problematic_subdomain_precond_only"))
+            {
+                problematic_subdomain_precond_only = params["Experimental"]["problematic_subdomain_precond_only"];
+            }
+            if (params["Experimental"].contains("jacobi_precond"))
+            {
+                jacobi_precond = params["Experimental"]["jacobi_precond"];
+            }
+            if (params["Experimental"].contains("use_problematic_subdomain_for_initial_guess"))
+            {
+                use_problematic_subdomain_for_initial_guess = params["Experimental"]["use_problematic_subdomain_for_initial_guess"];
+            }
+            if (params["Experimental"].contains("decompose_subdomains"))
+            {
+                decompose_subdomains = params["Experimental"]["decompose_subdomains"];
+            }
         }
     }
 
@@ -606,6 +622,47 @@ namespace polysolve::linear
                 file << std::endl;;
                 file.close();
             }
+
+            if (decompose_subdomains)
+            {
+                std::set<int> all_bad_dofs;
+                for (auto &subdomain : bad_indices_)
+                {
+                    for (auto index : subdomain)
+                    {
+                        all_bad_dofs.insert(index);
+                    }
+                }
+                bad_indices_.clear();
+                for (auto index : all_bad_dofs)
+                {
+                    bool placed = false;
+                    for (auto &subdomain : bad_indices_)
+                    {
+                        for (auto subdomain_index : subdomain)
+                        {
+                            if (sparse_A.coeffRef(index, subdomain_index) != 0)
+                            {
+                                subdomain.insert(index);
+                                placed = true;
+                            }
+                            if (placed)
+                            {
+                                break;
+                            }
+                        }
+                        if (placed)
+                        {
+                            break;
+                        }
+                    }
+                    if (!placed)
+                    {
+                        bad_indices_.push_back({index});
+                    }
+                }
+            }
+
             bad_indices_arrays.clear();
             bad_indices_arrays.resize(bad_indices_.size());
             for (int i = 0; i < bad_indices_.size(); ++i)
@@ -737,6 +794,20 @@ namespace polysolve::linear
 #endif
         double pre_loop_time;
         double bi_prod, eps, gamma, old_gamma;
+
+        if (use_problematic_subdomain_for_initial_guess)
+        {
+            if (myid == 0)
+            {
+                Eigen::VectorXd temp(result.size());
+                temp.setZero();
+                dss_precond_iter(temp, rhs, result);
+            }
+#ifdef HYPRE_WITH_MPI
+            MPI_Bcast(result.data(), result.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+#endif
+        }
+
         Eigen::VectorXd r, p, z;
         {
             POLYSOLVE_SCOPED_STOPWATCH("pre loop time: ", pre_loop_time, *logger);
@@ -810,7 +881,7 @@ namespace polysolve::linear
             {
                 logger->debug("Experimental solver error: negative or zero alpha value. gamma: {}, sdotp: {}", gamma, sdotp);
                 
-                if (myid == 0 && bad_indices_.size() > 0 && bad_indices_[0].size() > 0)
+                if (false && myid == 0 && bad_indices_.size() > 0 && bad_indices_[0].size() > 0)
                 {
                     polysolve::StiffnessMatrix A_copy = sparse_A;
                     Spectra::SparseSymMatProd<double> op(A_copy);
@@ -863,7 +934,7 @@ namespace polysolve::linear
             if (drob2 < conv_tol_ * conv_tol_)
             {
                 logger->debug("Experimental solver converged: change in residual too small");
-                break;
+                //break;
             }
 
             double i_prod = r.dot(r);
@@ -1259,6 +1330,22 @@ namespace polysolve::linear
         z2.setZero();
         z3.setZero();
 
+        if (problematic_subdomain_precond_only)
+        {
+            if (bad_indices_.size() > 0 && bad_indices_[0].size() > 0)
+            {
+                Eigen::VectorXd z0(r.size());
+                z0.setZero();
+                dss_precond_iter(z0, r, z1);
+                z = z1;
+            }
+            else 
+            {
+                z = r;
+            }
+            return;
+        }
+
         assert(bad_indices_.size() == 1);
         if (!do_mixed_precond || bad_indices_.size() == 0 || bad_indices_[0].size() == 0)
         {
@@ -1292,6 +1379,19 @@ namespace polysolve::linear
 
     void ExperimentalSolver::amg_precond_iter(const HYPRE_Solver &precond, const Eigen::Ref<const VectorXd> eigen_b, Eigen::VectorXd &eigen_x)
     {
+
+        if (jacobi_precond)
+        {
+            if (myid == 0)
+            {
+                eigen_x = sparse_A.diagonal().asDiagonal().inverse() * eigen_b;
+            }
+#ifdef HYPRE_WITH_MPI
+            MPI_Bcast(eigen_x.data(), eigen_x.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+#endif
+            return;
+        }
+
         HYPRE_ParVector par_x;
         HYPRE_IJVector x;
         HYPRE_ParVector par_b;
@@ -1526,6 +1626,7 @@ namespace polysolve::linear
 
     void ExperimentalSolver::factorize_submatrix()
     {
+        if (do_mixed_precond || use_problematic_subdomain_for_initial_guess || problematic_subdomain_precond_only)
         {
             POLYSOLVE_SCOPED_STOPWATCH("assemble D", dss_assembly_time, *logger);
             D_solvers.clear();
@@ -1546,6 +1647,7 @@ namespace polysolve::linear
                 }
             }
 
+            logger->trace("Num subdomains: {}", bad_indices_.size());
             for (int i = 0; i < bad_indices_.size(); ++i)
             {
                 Eigen::SparseMatrix<double> D;
