@@ -638,5 +638,29 @@
         "default": 0,
         "type": "int",
         "doc": "Option for projecting D"
-    }             
+    },
+    {
+        "pointer": "/Experimental/problematic_subdomain_precond_only",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to precondition with only subdomain"
+    },
+    {
+        "pointer": "/Experimental/jacobi_precond",
+        "default": false,
+        "type": "bool",
+        "doc": "If true, precondition with Jacobi instead of AMG"
+    },
+    {
+        "pointer": "/Experimental/use_problematic_subdomain_for_initial_guess",
+        "default": false,
+        "type": "bool",
+        "doc": "Use problematic subdomain inverse as initial guess for PCG."
+    },
+    {
+        "pointer": "/Experimental/decompose_domains",
+        "default": false,
+        "type": "bool",
+        "doc": "Decompose subdomains for preconditioner"
+    }                         
 ]
