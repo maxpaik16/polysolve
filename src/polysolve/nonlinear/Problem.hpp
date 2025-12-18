@@ -120,7 +120,7 @@ namespace polysolve::nonlinear
 
         virtual double grad_norm(const TVector &x, const std::string &norm_type) const {return x.norm();}
         virtual double step_norm(const TVector &x, const std::string &norm_type) const {return x.norm();}
-        virtual Eigen::DiagonalMatrix<double, Eigen::Dynamic> current_lumped_mass(const int size)
+        virtual Eigen::DiagonalMatrix<double, Eigen::Dynamic> current_lumped_mass(const int size) const
         {
             Eigen::DiagonalMatrix<double, Eigen::Dynamic> id(size);
             id.setIdentity();

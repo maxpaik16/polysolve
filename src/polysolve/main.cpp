@@ -22,14 +22,14 @@
 
 void usage(const std::string &executable)
 {
-    std::cout << "Usage: " << executable << " solver A_file param_file num_trials" << std::endl;
+    std::cout << "Usage: " << executable << " solver A_file b_file param_file num_trials [ind_file]" << std::endl;
 }
 
 
 int main(int argc, char **argv)
 {
 
-    if (argc != 5)
+    if (argc != 6 && argc != 7)
     {
         const std::string executable(argv[0]);
         usage(executable);
@@ -70,8 +70,16 @@ int main(int argc, char **argv)
 
     const std::string solver_str(argv[1]);
     const std::string A_file(argv[2]);
-    const std::string param_file(argv[3]);
-    const std::string num_files_str(argv[4]);
+    const std::string b_file(argv[3]);
+    const std::string param_file(argv[4]);
+    const std::string num_files_str(argv[5]);
+
+    std::string ind_file = "NONE";
+    if (argc == 7)
+    {
+        ind_file = argv[6];
+    }
+
     const int num_trials = std::stoi(num_files_str);
 
     auto solver = polysolve::linear::Solver::create(solver_str, "");
@@ -84,6 +92,7 @@ int main(int argc, char **argv)
     Eigen::SparseMatrix<double> A;
     Eigen::VectorXd b;
     int rows, cols, nnzs;
+    std::vector<std::set<int>> bad_indices;
 
     if (myid == 0)
     {
@@ -104,11 +113,58 @@ int main(int argc, char **argv)
                 logger->error("Could not load Matrix Market file");
                 return 1;
             }
+
+            std::vector<Eigen::Triplet<double>> triplets;
+            triplets.reserve(2 * A.nonZeros());
+
+            for (int k = 0; k < A.outerSize(); ++k)
+            {
+                for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it)
+                {   
+                    triplets.push_back(Eigen::Triplet<double>(it.row(), it.col(), it.value()));
+                    if (it.col() != it.row())
+                    {
+                        triplets.push_back(Eigen::Triplet<double>(it.col(), it.row(), it.value()));
+                    }
+                }
+            }
+
+            A.setFromTriplets(triplets.begin(), triplets.end());
+            
             rows = A.rows();
             cols = A.cols();
             nnzs = A.nonZeros();
 
             logger->trace("Symmetry: {}", A.isApprox(A.transpose()));
+
+
+            if (b_file != "NONE")
+            {
+                std::ifstream b_file_object(b_file);
+                b.resize(rows);
+                double val;
+                int i = 0;
+                while (b_file_object >> val)
+                {
+                    b(i++) = val;
+                }
+                b_file_object.close();
+            }   
+
+            if (ind_file != "NONE")
+            {
+                bad_indices.resize(1);
+                
+                std::ifstream file(ind_file);
+
+                int n;
+                while (file >> n)
+                {
+                    bad_indices[0].insert(n);
+                }
+                
+                file.close();
+            }
         }
 
         logger->trace("Problem size: {}, nnzs: {}", rows, nnzs);
@@ -125,7 +181,10 @@ int main(int argc, char **argv)
             {
                 double solve_time;
                 x.setZero();
-                b = Eigen::VectorXd::Random(rows);
+                if (b_file == "NONE")
+                {
+                    b = Eigen::VectorXd::Random(rows);
+                }
                 {
                     POLYSOLVE_SCOPED_STOPWATCH("total solve time", solve_time, *logger);
                     solver->analyze_pattern(A, A.rows());
@@ -189,11 +248,16 @@ int main(int argc, char **argv)
 
     logger->info("Starting solve 2...");
 
+    solver->set_problematic_dofs(bad_indices);
+
     for (int solve_i = 0; solve_i < num_trials; ++solve_i)
     {
         double solve_time;
         x.setZero();
-        b = Eigen::VectorXd::Random(rows);
+        if (b_file == "NONE")
+        {
+            b = Eigen::VectorXd::Random(rows);
+        }
         {
             POLYSOLVE_SCOPED_STOPWATCH("total solve time", solve_time, *logger);
             solver->analyze_pattern(A, A.rows());
