@@ -258,7 +258,7 @@ namespace polysolve::nonlinear
                 // Eigen::saveMarket(hessian, "problematic_hessian.mtx");
                 return std::nan("");
             }
-            linear_solver->solve(grad, direction); // H Δx = -g
+            linear_solver->solve(-grad, direction); // H Δx = -g
         }
 
         const double residual = objFunc.grad_norm(hessian * direction + grad, norm_type); // H Δx + g = 0
