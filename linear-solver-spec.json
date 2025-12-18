@@ -658,7 +658,7 @@
         "doc": "Use problematic subdomain inverse as initial guess for PCG."
     },
     {
-        "pointer": "/Experimental/decompose_domains",
+        "pointer": "/Experimental/decompose_subdomains",
         "default": false,
         "type": "bool",
         "doc": "Decompose subdomains for preconditioner"
