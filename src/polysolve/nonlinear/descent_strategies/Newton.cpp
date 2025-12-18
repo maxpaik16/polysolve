@@ -237,7 +237,7 @@ namespace polysolve::nonlinear
             linear_solver->reduced_to_full_func = objFunc.reduced_to_full_func;
         }
 
-        Eigen::DiagonalMatrix<double, Eigen::Dynamic> M_inv_sqrt = objFunc.current_lumped_mass().inverse();
+        Eigen::DiagonalMatrix<double, Eigen::Dynamic> M_inv_sqrt = objFunc.current_lumped_mass(x.size()).inverse();
         for (int i = 0; i < M_inv_sqrt.rows(); ++i)
         {
             M_inv_sqrt.diagonal()(i) = std::sqrt(M_inv_sqrt.diagonal()(i));
