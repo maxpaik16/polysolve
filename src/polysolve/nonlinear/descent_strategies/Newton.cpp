@@ -241,7 +241,7 @@ namespace polysolve::nonlinear
             POLYSOLVE_SCOPED_STOPWATCH("linear solve", this->inverting_time, m_logger);
             if (use_adaptive_residual_tolerance)
             {
-                linear_solver->set_tolerance(residual_tolerance);
+                linear_solver->set_tolerance(residual_tolerance / 100);
             }
             // TODO: get the correct size
             linear_solver->analyze_pattern(hessian, hessian.rows());
