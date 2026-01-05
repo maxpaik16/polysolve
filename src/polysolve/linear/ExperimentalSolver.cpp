@@ -623,42 +623,58 @@ namespace polysolve::linear
                 file.close();
             }
 
-            if (decompose_subdomains)
+                        if (decompose_subdomains)
             {
-                std::set<int> all_bad_dofs;
+                std::vector<int> all_bad_dofs;
+                std::map<int, int> bad_dof_i_to_i;
+                std::set<int> all_bad_dofs_set;
                 for (auto &subdomain : bad_indices_)
                 {
                     for (auto index : subdomain)
                     {
-                        all_bad_dofs.insert(index);
+                        bad_dof_i_to_i[index] = all_bad_dofs.size();
+                        all_bad_dofs.push_back(index);
+                        all_bad_dofs_set.insert(index);
                     }
                 }
+
+                disjointSet decomposed_subdomains(all_bad_dofs.size());
+                for (int k = 0; k < sparse_A.outerSize(); ++k)
+                {
+                    if (all_bad_dofs_set.count(k) == 0)
+                    {
+                        continue;
+                    }
+                    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+                    {
+                        if (all_bad_dofs_set.count(it.row()) != 0 && all_bad_dofs_set.count(it.col()) != 0)
+                        {
+                            decomposed_subdomains.union_set(bad_dof_i_to_i[it.row()], bad_dof_i_to_i[it.col()]);
+                        }
+                    }
+                }
+
                 bad_indices_.clear();
+                std::vector<int> chosen_sets;
                 for (auto index : all_bad_dofs)
                 {
                     bool placed = false;
+                    int s_i = 0;
                     for (auto &subdomain : bad_indices_)
                     {
-                        for (auto subdomain_index : subdomain)
+                        if (chosen_sets[s_i] == decomposed_subdomains.find_set(bad_dof_i_to_i[index]))
                         {
-                            if (sparse_A.coeffRef(index, subdomain_index) != 0)
-                            {
-                                subdomain.insert(index);
-                                placed = true;
-                            }
-                            if (placed)
-                            {
-                                break;
-                            }
-                        }
-                        if (placed)
-                        {
+                            subdomain.insert(index);
+                            placed = true;
                             break;
                         }
+                        ++s_i;
                     }
+
                     if (!placed)
                     {
                         bad_indices_.push_back({index});
+                        chosen_sets.push_back(decomposed_subdomains.find_set(bad_dof_i_to_i[index]));
                     }
                 }
             }
@@ -1384,7 +1400,7 @@ namespace polysolve::linear
         {
             if (myid == 0)
             {
-                eigen_x = sparse_A.diagonal().asDiagonal().inverse() * eigen_b;
+                eigen_x = sparse_A.diagonal().asDiagonal().inverse() * (eigen_b - (sparse_A * eigen_x - sparse_A.diagonal().asDiagonal() * eigen_x));
             }
 #ifdef HYPRE_WITH_MPI
             MPI_Bcast(eigen_x.data(), eigen_x.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
@@ -1438,6 +1454,7 @@ namespace polysolve::linear
             {
                 next_z = z;
             
+                #pragma omp parallel for
                 for (int index = 0; index < bad_indices_arrays.size(); ++index)
                 {
                     auto &subdomain = bad_indices_arrays[index];
