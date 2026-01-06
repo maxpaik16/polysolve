@@ -88,7 +88,7 @@ option(POLYSOLVE_WITH_PARDISO       "Enable Pardiso library"                    
 option(POLYSOLVE_WITH_HYPRE         "Enable hypre"                                       ON)
 option(POLYSOLVE_WITH_AMGCL         "Use AMGCL"                                          ON)
 option(POLYSOLVE_WITH_SPECTRA       "Enable Spectra library"                             ON)
-option(POLYSOLVE_WITH_ICHOL         "Enable use of incomplete Cholesky preconditioner"   OFF)
+option(POLYSOLVE_WITH_ICHOL         "Enable use of incomplete Cholesky preconditioner"   ON)
 
 # Sanitizer options
 option(POLYSOLVE_SANITIZE_ADDRESS   "Sanitize Address"                                  OFF)
@@ -370,7 +370,7 @@ target_link_libraries(polysolve PRIVATE polysolve::warnings)
 
 if(POLYSOLVE_TOPLEVEL_PROJECT)
 
-    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -no-pie")
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -no-pie -lmpi_cxx")
     add_executable(${PROJECT_NAME}_bin src/polysolve/main.cpp)
 
     target_compile_features(${PROJECT_NAME}_bin PUBLIC cxx_std_14)
