@@ -471,6 +471,10 @@
             "use_absolute_tol",
             "rho",
             "bad_dof_threshold",
+            "max_bad_dof_threshold",
+            "adapt_bad_dof_threshold",
+            "bad_dof_threshold_inc_factor",
+            "adaptive_max_iters",
             "select_bad_dofs_from_rhs",
             "select_bad_dofs_from_row_norms",
             "select_bad_dofs_from_amg",
@@ -590,6 +594,30 @@
         "default": 0.1,
         "type": "float",
         "doc": "What percentile to use as a cutoff for marking a node as problematic (between 0 and 1)."
+    },
+    {
+        "pointer": "/Experimental/max_bad_dof_threshold",
+        "default": 0.5,
+        "type": "float",
+        "doc": "Maximum percentile to use as a cutoff for marking a node as problematic (between 0 and 1)."
+    },
+    {
+        "pointer": "/Experimental/bad_dof_threshold_inc_factor",
+        "default": 1.1,
+        "type": "float",
+        "doc": "How much to increase the bad dof threshold by if a solve fails and adaptivity is turned on."
+    },
+    {
+        "pointer": "/Experimental/adapt_bad_dof_threshold",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to use adaptively select size of problematic subspace."
+    },
+    {
+        "pointer": "/Experimental/adaptive_max_iters",
+        "default": 100,
+        "type": "int",
+        "doc": "Maximum number of iterations to try before attempting a larger problematic subspace."
     },
     {
         "pointer": "/Experimental/save_selection_criteria",
