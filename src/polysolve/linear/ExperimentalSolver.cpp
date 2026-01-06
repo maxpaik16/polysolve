@@ -131,7 +131,7 @@ namespace polysolve::linear
             }
             if (params["Experimental"].contains("max_bad_dof_threshold"))
             {
-                bad_dof_threshold = params["Experimental"]["max_bad_dof_threshold"];
+                max_bad_dof_threshold = params["Experimental"]["max_bad_dof_threshold"];
             }
 #ifdef POLYSOLVE_WITH_ICHOL
             if (params["Experimental"].contains("use_incomplete_cholesky_precond"))
@@ -1359,7 +1359,7 @@ namespace polysolve::linear
 
                     double d_solve_time;
                     {
-                        POLYSOLVE_SCOPED_STOPWATCH("D solve time", d_solve_time, *logger);
+                        //POLYSOLVE_SCOPED_STOPWATCH("D solve time", d_solve_time, *logger);
                         sub_result = D_solvers[index].solve(sub_rhs);
                     }
 
@@ -1491,7 +1491,7 @@ namespace polysolve::linear
         {
             std::ofstream file;
             file.open("criteria.txt", std::ios_base::app);
-            file << reduced_to_full_func(sq_mags).transpose() << std::endl;
+            file << sq_mags.transpose() << std::endl;
             file.close();
         }
 
