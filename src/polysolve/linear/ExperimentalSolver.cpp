@@ -129,6 +129,10 @@ namespace polysolve::linear
             {
                 bad_dof_threshold = params["Experimental"]["bad_dof_threshold"];
             }
+            if (params["Experimental"].contains("max_bad_dof_threshold"))
+            {
+                bad_dof_threshold = params["Experimental"]["max_bad_dof_threshold"];
+            }
 #ifdef POLYSOLVE_WITH_ICHOL
             if (params["Experimental"].contains("use_incomplete_cholesky_precond"))
             {
@@ -186,6 +190,18 @@ namespace polysolve::linear
             if (params["Experimental"].contains("decompose_subdomains"))
             {
                 decompose_subdomains = params["Experimental"]["decompose_subdomains"];
+            }
+            if (params["Experimental"].contains("adapt_bad_dof_threshold"))
+            {
+                adapt_bad_dof_threshold = params["Experimental"]["adapt_bad_dof_threshold"];
+            }
+            if (params["Experimental"].contains("bad_dof_threshold_inc_factor"))
+            {
+                bad_dof_threshold_inc_factor = params["Experimental"]["bad_dof_threshold_inc_factor"];
+            }
+            if (params["Experimental"].contains("adaptive_max_iters"))
+            {
+                adaptive_max_iters = params["Experimental"]["adaptive_max_iters"];
             }
         }
     }
@@ -604,153 +620,16 @@ namespace polysolve::linear
         }
 
 #ifdef HYPRE_WITH_MPI
-        if (myid == 0) 
-        {
-#endif
-            select_bad_indices(remapped_rhs);
-            if (save_selected_indices)
-            {
-                std::ofstream file;
-                file.open("selected_indices.txt", std::ios_base::app);
-                if (bad_indices_.size() > 0)
-                {
-                    for (auto i : bad_indices_[0])
-                    {
-                        file << i << " ";
-                    }
-                }
-                file << std::endl;;
-                file.close();
-            }
-
-                        if (decompose_subdomains)
-            {
-                std::vector<int> all_bad_dofs;
-                std::map<int, int> bad_dof_i_to_i;
-                std::set<int> all_bad_dofs_set;
-                for (auto &subdomain : bad_indices_)
-                {
-                    for (auto index : subdomain)
-                    {
-                        bad_dof_i_to_i[index] = all_bad_dofs.size();
-                        all_bad_dofs.push_back(index);
-                        all_bad_dofs_set.insert(index);
-                    }
-                }
-
-                disjointSet decomposed_subdomains(all_bad_dofs.size());
-                for (int k = 0; k < sparse_A.outerSize(); ++k)
-                {
-                    if (all_bad_dofs_set.count(k) == 0)
-                    {
-                        continue;
-                    }
-                    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-                    {
-                        if (all_bad_dofs_set.count(it.row()) != 0 && all_bad_dofs_set.count(it.col()) != 0)
-                        {
-                            decomposed_subdomains.union_set(bad_dof_i_to_i[it.row()], bad_dof_i_to_i[it.col()]);
-                        }
-                    }
-                }
-
-                bad_indices_.clear();
-                std::vector<int> chosen_sets;
-                for (auto index : all_bad_dofs)
-                {
-                    bool placed = false;
-                    int s_i = 0;
-                    for (auto &subdomain : bad_indices_)
-                    {
-                        if (chosen_sets[s_i] == decomposed_subdomains.find_set(bad_dof_i_to_i[index]))
-                        {
-                            subdomain.insert(index);
-                            placed = true;
-                            break;
-                        }
-                        ++s_i;
-                    }
-
-                    if (!placed)
-                    {
-                        bad_indices_.push_back({index});
-                        chosen_sets.push_back(decomposed_subdomains.find_set(bad_dof_i_to_i[index]));
-                    }
-                }
-            }
-
-            bad_indices_arrays.clear();
-            bad_indices_arrays.resize(bad_indices_.size());
-            for (int i = 0; i < bad_indices_.size(); ++i)
-            {
-                bad_indices_arrays[i].reserve(bad_indices_[i].size());
-                for (auto index : bad_indices_[i])
-                {
-                    bad_indices_arrays[i].push_back(index);
-                }
-            }
-            factorize_submatrix();
-
-            if (print_conditioning)
-            {
-                check_matrix_conditioning("Hessian", sparse_A);
-                check_matrix_conditioning("Preconditioned Hessian", bad_indices_[0]);
-            }
-#ifdef HYPRE_WITH_MPI
-        }
-#endif
-
-#ifdef HYPRE_WITH_MPI
-        int num_subdomains;
-        if (myid == 0)
-        {
-            num_subdomains = bad_indices_.size();
-            MPI_Bcast(&num_subdomains, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            if (bad_indices_.size() > 0)
-            {
-                for (int i = 0; i < num_subdomains; ++i)
-                {
-                    int num_indices = bad_indices_[i].size();
-                    MPI_Bcast(&num_indices, 1, MPI_INT, 0, MPI_COMM_WORLD);
-                    std::vector<int> subdomain_vec;
-                    for (auto index : bad_indices_[i])
-                    {
-                        subdomain_vec.push_back(index);
-                    }
-                    MPI_Bcast(subdomain_vec.data(), num_indices, MPI_INT, 0, MPI_COMM_WORLD);
-                    MPI_Barrier(MPI_COMM_WORLD);
-                }
-            }
-        } 
-        else
-        {
-            MPI_Bcast(&num_subdomains, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            bad_indices_.clear();
-            bad_indices_.resize(num_subdomains);
-            for (int i = 0; i < num_subdomains; ++i)
-            {
-                int num_indices;
-                MPI_Bcast(&num_indices, 1, MPI_INT, 0, MPI_COMM_WORLD);
-                std::vector<int> subdomain_vec;
-                subdomain_vec.resize(num_indices);
-                MPI_Bcast(subdomain_vec.data(), num_indices, MPI_INT, 0, MPI_COMM_WORLD);
-                for (auto index : subdomain_vec)
-                {
-                    bad_indices_[i].insert(index);
-                }
-                MPI_Barrier(MPI_COMM_WORLD);
-            }
-        }
-#endif
-
-#ifdef HYPRE_WITH_MPI
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
+
         double amg_setup_time;
         {
             POLYSOLVE_SCOPED_STOPWATCH("AMG setup time", amg_setup_time, *logger);
             HYPRE_BoomerAMGSetup(precond, parcsr_A, par_b, par_x);
         }
+
+        prepare_dss(remapped_rhs);
 
         /* Now setup and solve! */
         {
@@ -877,6 +756,15 @@ namespace polysolve::linear
         double loop_time;
         for (int k = 0; k < max_iter_; ++k)
         {
+
+            if (adapt_bad_dof_threshold && bad_dof_threshold < max_bad_dof_threshold && k >= adaptive_max_iters)
+            {
+                bad_dof_threshold *= bad_dof_threshold_inc_factor;
+                bad_dof_threshold = std::min(bad_dof_threshold, max_bad_dof_threshold);
+                prepare_dss(rhs);
+                pcg_solve(rhs, result, par_b, par_x, precond);
+                return;
+            }
             
             POLYSOLVE_SCOPED_STOPWATCH("main loop time: ", loop_time, *logger);
             num_iterations = k + 1;
@@ -1765,6 +1653,149 @@ namespace polysolve::linear
         MPI_Allreduce(MPI_IN_PLACE, result.data(), result.size(), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 #else
         result = A*x;
+#endif
+    }
+
+    void ExperimentalSolver::prepare_dss(Eigen::VectorXd &rhs)
+    {
+        #ifdef HYPRE_WITH_MPI
+        if (myid == 0) 
+        {
+#endif
+            select_bad_indices(rhs);
+            if (save_selected_indices)
+            {
+                std::ofstream file;
+                file.open("selected_indices.txt", std::ios_base::app);
+                if (bad_indices_.size() > 0)
+                {
+                    for (auto i : bad_indices_[0])
+                    {
+                        file << i << " ";
+                    }
+                }
+                file << std::endl;;
+                file.close();
+            }
+
+                        if (decompose_subdomains)
+            {
+                std::vector<int> all_bad_dofs;
+                std::map<int, int> bad_dof_i_to_i;
+                std::set<int> all_bad_dofs_set;
+                for (auto &subdomain : bad_indices_)
+                {
+                    for (auto index : subdomain)
+                    {
+                        bad_dof_i_to_i[index] = all_bad_dofs.size();
+                        all_bad_dofs.push_back(index);
+                        all_bad_dofs_set.insert(index);
+                    }
+                }
+
+                disjointSet decomposed_subdomains(all_bad_dofs.size());
+                for (int k = 0; k < sparse_A.outerSize(); ++k)
+                {
+                    if (all_bad_dofs_set.count(k) == 0)
+                    {
+                        continue;
+                    }
+                    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+                    {
+                        if (all_bad_dofs_set.count(it.row()) != 0 && all_bad_dofs_set.count(it.col()) != 0)
+                        {
+                            decomposed_subdomains.union_set(bad_dof_i_to_i[it.row()], bad_dof_i_to_i[it.col()]);
+                        }
+                    }
+                }
+
+                bad_indices_.clear();
+                std::vector<int> chosen_sets;
+                for (auto index : all_bad_dofs)
+                {
+                    bool placed = false;
+                    int s_i = 0;
+                    for (auto &subdomain : bad_indices_)
+                    {
+                        if (chosen_sets[s_i] == decomposed_subdomains.find_set(bad_dof_i_to_i[index]))
+                        {
+                            subdomain.insert(index);
+                            placed = true;
+                            break;
+                        }
+                        ++s_i;
+                    }
+
+                    if (!placed)
+                    {
+                        bad_indices_.push_back({index});
+                        chosen_sets.push_back(decomposed_subdomains.find_set(bad_dof_i_to_i[index]));
+                    }
+                }
+            }
+
+            bad_indices_arrays.clear();
+            bad_indices_arrays.resize(bad_indices_.size());
+            for (int i = 0; i < bad_indices_.size(); ++i)
+            {
+                bad_indices_arrays[i].reserve(bad_indices_[i].size());
+                for (auto index : bad_indices_[i])
+                {
+                    bad_indices_arrays[i].push_back(index);
+                }
+            }
+            factorize_submatrix();
+
+            if (print_conditioning)
+            {
+                check_matrix_conditioning("Hessian", sparse_A);
+                check_matrix_conditioning("Preconditioned Hessian", bad_indices_[0]);
+            }
+#ifdef HYPRE_WITH_MPI
+        }
+#endif
+
+#ifdef HYPRE_WITH_MPI
+        int num_subdomains;
+        if (myid == 0)
+        {
+            num_subdomains = bad_indices_.size();
+            MPI_Bcast(&num_subdomains, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (bad_indices_.size() > 0)
+            {
+                for (int i = 0; i < num_subdomains; ++i)
+                {
+                    int num_indices = bad_indices_[i].size();
+                    MPI_Bcast(&num_indices, 1, MPI_INT, 0, MPI_COMM_WORLD);
+                    std::vector<int> subdomain_vec;
+                    for (auto index : bad_indices_[i])
+                    {
+                        subdomain_vec.push_back(index);
+                    }
+                    MPI_Bcast(subdomain_vec.data(), num_indices, MPI_INT, 0, MPI_COMM_WORLD);
+                    MPI_Barrier(MPI_COMM_WORLD);
+                }
+            }
+        } 
+        else
+        {
+            MPI_Bcast(&num_subdomains, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            bad_indices_.clear();
+            bad_indices_.resize(num_subdomains);
+            for (int i = 0; i < num_subdomains; ++i)
+            {
+                int num_indices;
+                MPI_Bcast(&num_indices, 1, MPI_INT, 0, MPI_COMM_WORLD);
+                std::vector<int> subdomain_vec;
+                subdomain_vec.resize(num_indices);
+                MPI_Bcast(subdomain_vec.data(), num_indices, MPI_INT, 0, MPI_COMM_WORLD);
+                for (auto index : subdomain_vec)
+                {
+                    bad_indices_[i].insert(index);
+                }
+                MPI_Barrier(MPI_COMM_WORLD);
+            }
+        }
 #endif
     }
 

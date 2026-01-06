@@ -8,7 +8,7 @@
 #include <vector>
 #include <deque>
 #include <Eigen/SparseCholesky>
-//#include <Eigen/PardisoSupport>
+#include <Eigen/PardisoSupport>
 
 #include <HYPRE_utilities.h>
 #include <HYPRE.h>
@@ -107,6 +107,10 @@ namespace polysolve::linear
         bool use_absolute_tol = false;
         bool save_selection_criteria = false;
         double bad_dof_threshold = 0.1;
+        double max_bad_dof_threshold = 0.5; 
+        bool adapt_bad_dof_threshold = false;
+        double bad_dof_threshold_inc_factor = 1.5;
+        int adaptive_max_iters = 100;
         bool select_bad_dofs_from_rhs = false;
         bool select_bad_dofs_from_row_norms = false;
         bool select_bad_dofs_from_amg = false;
@@ -137,7 +141,7 @@ namespace polysolve::linear
         int start_i, end_i;
 
         Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_A;
-        std::deque<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>> D_solvers;
+        std::deque<Eigen::PardisoLDLT<Eigen::SparseMatrix<double>>> D_solvers;
 
         std::vector<std::vector<int>> bad_indices_arrays;
         std::vector<std::unordered_map<int, int>> index_mappings;
@@ -165,6 +169,8 @@ namespace polysolve::linear
         void amg_precond_iter(const HYPRE_Solver &precond, const Ref<const VectorXd> b, Eigen::VectorXd &x);
         void dss_precond_iter(const Eigen::VectorXd &z, const Eigen::VectorXd &r, Eigen::VectorXd &next_z);
         void matmul(Eigen::VectorXd &x, Eigen::SparseMatrix<double, Eigen::RowMajor> &A, Eigen::VectorXd &result);
+        void prepare_dss(Eigen::VectorXd &rhs);
+
 
         void GeneratePlaneRotation(double &dx, double &dy, double &cs, double &sn)
         {
