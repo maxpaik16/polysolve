@@ -1344,7 +1344,7 @@ namespace polysolve::linear
             {
                 next_z = z;
             
-                #pragma omp parallel for
+                #pragma omp parallel for num_threads(world_size)
                 for (int index = 0; index < bad_indices_arrays.size(); ++index)
                 {
                     auto &subdomain = bad_indices_arrays[index];
@@ -1563,7 +1563,7 @@ namespace polysolve::linear
                 std::vector<std::vector<Eigen::Triplet<double>>> triplets_array;
                 triplets_array.resize(omp_get_max_threads());
 
-                #pragma omp parallel for
+                #pragma omp parallel for num_threads(world_size)
                 for (int k = 0; k < sparse_A.outerSize(); ++k)
                 {
                     if (bad_indices_[i].count(k) == 0)
