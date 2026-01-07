@@ -235,9 +235,10 @@ namespace polysolve::linear
         logger->trace("Eigen num threads: {}", Eigen::nbThreads());
 
 #ifdef POLYSOLVE_WITH_ICHOL
+        double ichol_fac_time;
         if (use_incomplete_cholesky_precond)
         {
-            logger->trace("Factorizing for ichol");
+            POLYSOLVE_SCOPED_STOPWATCH("ichol factorization time", ichol_fac_time, *logger);
             pt.put<double>("nei_num.value", rho);
             pt.put<double>("alpha.value", 1e-4);
             pt.put<std::ptrdiff_t>("max_su_size.value", 64);
@@ -287,8 +288,10 @@ namespace polysolve::linear
         }
 #endif
 
+        double matrix_destroy_time;
         if (has_matrix_)
         {
+            POLYSOLVE_SCOPED_STOPWATCH("matrix destroy time", matrix_destroy_time, *logger);
             HYPRE_IJMatrixDestroy(A);
             has_matrix_ = false;
         }
@@ -548,8 +551,10 @@ namespace polysolve::linear
         Eigen::VectorXd remapped_result = result;
 
 #ifdef HYPRE_WITH_MPI
+        double copy_to_ranks_time;
         if (myid == 0)
         {
+            POLYSOLVE_SCOPED_STOPWATCH("copy problem to other ranks time", copy_to_ranks_time, *logger);
             MPI_Bcast(remapped_rhs.data(), remapped_rhs.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
             MPI_Bcast(remapped_result.data(), remapped_result.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
             int start_solve = 1;
@@ -617,11 +622,11 @@ namespace polysolve::linear
             }
 
             HYPRE_BoomerAMGSetMaxIter(precond, amg_iters);
-        }
 
 #ifdef HYPRE_WITH_MPI
-        MPI_Barrier(MPI_COMM_WORLD);
+            MPI_Barrier(MPI_COMM_WORLD);
 #endif
+        }
 
         double amg_setup_time;
         {
@@ -633,9 +638,6 @@ namespace polysolve::linear
 
         /* Now setup and solve! */
         {
-#ifdef HYPRE_WITH_MPI
-            MPI_Barrier(MPI_COMM_WORLD);
-#endif
             POLYSOLVE_SCOPED_STOPWATCH("actual solve time", actual_solve_time, *logger);
 
             if (use_minres)
@@ -1641,6 +1643,8 @@ namespace polysolve::linear
 
     void ExperimentalSolver::matmul(Eigen::VectorXd &x, Eigen::SparseMatrix<double, Eigen::RowMajor> &A, Eigen::VectorXd &result)
     {
+        double matmul_time;
+        POLYSOLVE_SCOPED_STOPWATCH("matmul time", matmul_time, *logger);
 #ifdef HYPRE_WITH_MPI
         result.resize(x.size());
         result.setZero();
@@ -1658,7 +1662,9 @@ namespace polysolve::linear
 
     void ExperimentalSolver::prepare_dss(Eigen::VectorXd &rhs)
     {
-        #ifdef HYPRE_WITH_MPI
+        double prepare_dss_time;
+        POLYSOLVE_SCOPED_STOPWATCH("prepare dss time", prepare_dss_time, *logger);
+#ifdef HYPRE_WITH_MPI
         if (myid == 0) 
         {
 #endif
@@ -1748,6 +1754,8 @@ namespace polysolve::linear
 
             if (print_conditioning)
             {
+                double print_cond_time;
+                POLYSOLVE_SCOPED_STOPWATCH("print conditioning time", print_cond_time, *logger);
                 check_matrix_conditioning("Hessian", sparse_A);
                 check_matrix_conditioning("Preconditioned Hessian", bad_indices_[0]);
             }
