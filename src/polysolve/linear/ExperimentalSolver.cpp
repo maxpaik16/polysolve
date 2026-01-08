@@ -739,8 +739,10 @@ namespace polysolve::linear
             z.setZero();
 
 #ifdef POLYSOLVE_WITH_ICHOL
+            double ichol_time;
             if (use_incomplete_cholesky_precond)
             {
+                POLYSOLVE_SCOPED_STOPWATCH("ichol time: ", ichol_time, *logger);
                 z = inc_chol_precond->solve(r);
             } else
 #endif
@@ -859,8 +861,10 @@ namespace polysolve::linear
             z.setZero(); 
 
 #ifdef POLYSOLVE_WITH_ICHOL
+            double ichol_time;
             if (use_incomplete_cholesky_precond)
             {
+                POLYSOLVE_SCOPED_STOPWATCH("ichol time: ", ichol_time, *logger);
                 z = inc_chol_precond->solve(r);
             } else
 #endif
@@ -1646,15 +1650,22 @@ namespace polysolve::linear
         double matmul_time;
         POLYSOLVE_SCOPED_STOPWATCH("matmul time", matmul_time, *logger);
 #ifdef HYPRE_WITH_MPI
-        result.resize(x.size());
-        result.setZero();
-        
-        for (int i = start_i; i <= end_i; ++i)
+        if (num_procs == 1)
         {
-            result(i) = sparse_A.row(i).dot(x);
+            result = A * x;
         }
+        else
+        {
+            result.resize(x.size());
+            result.setZero();
+            
+            for (int i = start_i; i <= end_i; ++i)
+            {
+                result(i) = sparse_A.row(i).dot(x);
+            }
 
-        MPI_Allreduce(MPI_IN_PLACE, result.data(), result.size(), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            MPI_Allreduce(MPI_IN_PLACE, result.data(), result.size(), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        }
 #else
         result = A*x;
 #endif
