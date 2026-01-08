@@ -246,7 +246,7 @@ namespace polysolve::linear
             pt.put<int>("subst_num_threads.value", num_threads);
             
             Eigen::Matrix<size_t, -1, -1> test_elements = elements_.cast<size_t>();
-            mschol::chol_hierarchy builder(test_elements, positions_.transpose(), positions_.cols() == 2 ? "trig" : "tets");
+            mschol::chol_hierarchy builder(test_elements.transpose(), positions_.transpose(), positions_.cols() == 2 ? "trig" : "tets");
             
             std::vector<std::shared_ptr<mschol::chol_level>> levels;
             builder.build(levels, 125, dimension_);
