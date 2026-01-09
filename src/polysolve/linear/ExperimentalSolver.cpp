@@ -835,7 +835,6 @@ namespace polysolve::linear
             }
 
             result += alpha * p;
-            matmul(p, sparse_A, A_times_p);
             r -= alpha * A_times_p;
             //r = rhs - (sparse_A * result);
             double drob2 = alpha * alpha * p.dot(p);
