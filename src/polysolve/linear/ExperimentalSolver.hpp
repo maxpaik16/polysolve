@@ -27,6 +27,25 @@ namespace mschol {
 namespace polysolve::linear
 {
 
+    class AbstractSolver {
+    public:
+        virtual void compute(const Eigen::SparseMatrix<double>& A) = 0;
+        virtual Eigen::VectorXd solve(const Eigen::VectorXd& b) = 0;
+        virtual ~AbstractSolver() = default;
+    };
+
+    template <typename EigenSolverT>
+    class EigenWrapper : public AbstractSolver {
+        EigenSolverT solver;
+    public:
+        void compute(const Eigen::SparseMatrix<double>& A) override {
+            solver.compute(A);
+        }
+        Eigen::VectorXd solve(const Eigen::VectorXd& b) override {
+            return solver.solve(b);
+        }
+    };
+
     class ExperimentalSolver : public Solver
     {
 
@@ -141,7 +160,7 @@ namespace polysolve::linear
         int start_i, end_i;
 
         Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_A;
-        std::deque<Eigen::PardisoLDLT<Eigen::SparseMatrix<double>>> D_solvers;
+        std::deque<std::unique_ptr<AbstractSolver>> D_solvers;
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> diag_inv; 
 
         std::vector<std::vector<int>> bad_indices_arrays;

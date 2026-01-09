@@ -1351,16 +1351,24 @@ namespace polysolve::linear
             else
             {
                 next_z = z;
+
+                std::vector<Eigen::VectorXd> rhs_workspace(num_procs);
+                std::vector<Eigen::VectorXd> res_workspace(num_procs);
             
                 #pragma omp parallel for num_threads(num_procs)
                 for (int index = 0; index < bad_indices_arrays.size(); ++index)
                 {
                     auto &subdomain = bad_indices_arrays[index];
 
-                    Eigen::VectorXd sub_rhs;
-                    Eigen::VectorXd sub_result;
-                    sub_rhs.resize(subdomain.size());
-                    sub_result.resize(subdomain.size());
+                    Eigen::VectorXd &sub_rhs = rhs_workspace[omp_get_thread_num()];
+                    Eigen::VectorXd &sub_result = res_workspace[omp_get_thread_num()];
+
+                    double resize_time;
+                    {
+                        //POLYSOLVE_SCOPED_STOPWATCH("test resize: ", resize_time, *logger);
+                        sub_rhs.resize(subdomain.size());
+                        sub_result.resize(subdomain.size());
+                    }
 
                     for (int i = 0; i < subdomain.size(); ++i)
                     {
@@ -1370,7 +1378,7 @@ namespace polysolve::linear
                     double d_solve_time;
                     {
                         //POLYSOLVE_SCOPED_STOPWATCH("D solve time", d_solve_time, *logger);
-                        sub_result = D_solvers[index].solve(sub_rhs);
+                        sub_result = D_solvers[index]->solve(sub_rhs);
                     }
 
                     for (int i = 0; i < subdomain.size(); ++i)
@@ -1545,7 +1553,18 @@ namespace polysolve::linear
         {
             POLYSOLVE_SCOPED_STOPWATCH("assemble D", dss_assembly_time, *logger);
             D_solvers.clear();
-            D_solvers.resize(bad_indices_.size());
+
+            for (int i = 0; i < bad_indices_.size(); ++i)
+            {   
+                if (bad_indices_[i].size() > 1000)
+                {
+                    D_solvers.push_back(std::make_unique<EigenWrapper<Eigen::PardisoLDLT<Eigen::SparseMatrix<double>>>>());
+                }
+                else 
+                {
+                    D_solvers.push_back(std::make_unique<EigenWrapper<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>>>());
+                }
+            }
 
             //logger->trace("H symmetric: {}", sparse_A.isApprox(sparse_A.transpose()));
 
@@ -1568,7 +1587,6 @@ namespace polysolve::linear
             {
                 Eigen::SparseMatrix<double> D;
                 D.resize(bad_indices_[i].size(), bad_indices_[i].size());
-                logger->trace("Subdomain size: {}", bad_indices_[i].size());
                 std::vector<Eigen::Triplet<double>> triplets;
 
                 for (int k = 0; k < sparse_A.outerSize(); ++k)
@@ -1587,6 +1605,8 @@ namespace polysolve::linear
                         triplets.push_back(Eigen::Triplet<double>(index_mappings[i][it.row()], index_mappings[i][it.col()], it.value()));
                     }
                 }
+
+                logger->trace("Subdomain size: {}, nnz: {}", bad_indices_[i].size(), triplets.size());
 
                 double set_from_triplets_time;
                 {
@@ -1633,7 +1653,7 @@ namespace polysolve::linear
 
                 {
                     POLYSOLVE_SCOPED_STOPWATCH("factorize D", dss_factorization_time, *logger);
-                    D_solvers[i].compute(D);
+                    D_solvers[i]->compute(D);
                 }
             
             }
@@ -1690,8 +1710,10 @@ namespace polysolve::linear
                 file.close();
             }
 
+            double decomp_time;
             if (decompose_subdomains)
             {
+                POLYSOLVE_SCOPED_STOPWATCH("subdomain decomposition time", decomp_time, *logger);
                 std::vector<int> all_bad_dofs;
                 std::map<int, int> bad_dof_i_to_i;
                 std::set<int> all_bad_dofs_set;
@@ -1836,7 +1858,7 @@ namespace polysolve::linear
                 ++i_counter;
             }
 
-            sub_result = D_solvers[0].solve(sub_rhs);
+            sub_result = D_solvers[0]->solve(sub_rhs);
             i_counter = 0;
             for (auto &i : subdomain)
             {
