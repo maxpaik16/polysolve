@@ -296,6 +296,11 @@ namespace polysolve::linear
             has_matrix_ = false;
         }
 
+        if (jacobi_precond && myid == 0)
+        {
+            diag_inv = sparse_A.diagonal().asDiagonal().inverse();
+        }
+
         if (save_problem && myid == 0)
         {
             logger->trace("Saving problem");
@@ -1294,7 +1299,7 @@ namespace polysolve::linear
         {
             if (myid == 0)
             {
-                eigen_x = sparse_A.diagonal().asDiagonal().inverse() * (eigen_b - (sparse_A * eigen_x - sparse_A.diagonal().asDiagonal() * eigen_x));
+                eigen_x = diag_inv * (eigen_b - (sparse_A * eigen_x - sparse_A.diagonal().asDiagonal() * eigen_x));
             }
 #ifdef HYPRE_WITH_MPI
             MPI_Bcast(eigen_x.data(), eigen_x.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
@@ -1559,15 +1564,14 @@ namespace polysolve::linear
             }
 
             logger->trace("Num subdomains: {}", bad_indices_.size());
+            #pragma omp parallel for num_threads(num_procs)
             for (int i = 0; i < bad_indices_.size(); ++i)
             {
                 Eigen::SparseMatrix<double> D;
                 D.resize(bad_indices_[i].size(), bad_indices_[i].size());
                 logger->trace("Subdomain size: {}", bad_indices_[i].size());
-                std::vector<std::vector<Eigen::Triplet<double>>> triplets_array;
-                triplets_array.resize(omp_get_max_threads());
+                std::vector<Eigen::Triplet<double>> triplets;
 
-                #pragma omp parallel for num_threads(num_procs)
                 for (int k = 0; k < sparse_A.outerSize(); ++k)
                 {
                     if (bad_indices_[i].count(k) == 0)
@@ -1581,16 +1585,8 @@ namespace polysolve::linear
                         {
                             continue;
                         }
-                        triplets_array[omp_get_thread_num()].push_back(Eigen::Triplet<double>(index_mappings[i][it.row()], index_mappings[i][it.col()], it.value()));
+                        triplets.push_back(Eigen::Triplet<double>(index_mappings[i][it.row()], index_mappings[i][it.col()], it.value()));
                     }
-                }
-
-                std::vector<Eigen::Triplet<double>> triplets;
-                triplets.reserve(bad_indices_[i].size());
-
-                for (auto &sub_triplet_array : triplets_array)
-                {
-                    triplets.insert(triplets.end(), sub_triplet_array.begin(), sub_triplet_array.end());
                 }
 
                 double set_from_triplets_time;
@@ -1695,7 +1691,7 @@ namespace polysolve::linear
                 file.close();
             }
 
-                        if (decompose_subdomains)
+            if (decompose_subdomains)
             {
                 std::vector<int> all_bad_dofs;
                 std::map<int, int> bad_dof_i_to_i;
