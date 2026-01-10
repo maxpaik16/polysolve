@@ -1715,57 +1715,43 @@ namespace polysolve::linear
             {
                 POLYSOLVE_SCOPED_STOPWATCH("subdomain decomposition time", decomp_time, *logger);
                 std::vector<int> all_bad_dofs;
-                std::map<int, int> bad_dof_i_to_i;
-                std::set<int> all_bad_dofs_set;
+                std::vector<int> global_to_local(sparse_A.rows(), -1);
                 for (auto &subdomain : bad_indices_)
                 {
                     for (auto index : subdomain)
                     {
-                        bad_dof_i_to_i[index] = all_bad_dofs.size();
+                        global_to_local[index] = all_bad_dofs.size();
                         all_bad_dofs.push_back(index);
-                        all_bad_dofs_set.insert(index);
                     }
                 }
 
                 disjointSet decomposed_subdomains(all_bad_dofs.size());
-                for (int k = 0; k < sparse_A.outerSize(); ++k)
+
+                for (int k : all_bad_dofs)
                 {
-                    if (all_bad_dofs_set.count(k) == 0)
-                    {
-                        continue;
-                    }
                     for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
                     {
-                        if (all_bad_dofs_set.count(it.row()) != 0 && all_bad_dofs_set.count(it.col()) != 0)
+                        if (global_to_local[it.col()] != -1)
                         {
-                            decomposed_subdomains.union_set(bad_dof_i_to_i[it.row()], bad_dof_i_to_i[it.col()]);
+                            decomposed_subdomains.union_set(global_to_local[it.row()], global_to_local[it.col()]);
                         }
                     }
+                }
+
+                std::unordered_map<int, std::vector<int>> chosen_sets;
+                for (auto index : all_bad_dofs)
+                {
+                    chosen_sets[decomposed_subdomains.find_set(global_to_local[index])].push_back(index);
                 }
 
                 bad_indices_.clear();
-                std::vector<int> chosen_sets;
-                for (auto index : all_bad_dofs)
-                {
-                    bool placed = false;
-                    int s_i = 0;
-                    for (auto &subdomain : bad_indices_)
-                    {
-                        if (chosen_sets[s_i] == decomposed_subdomains.find_set(bad_dof_i_to_i[index]))
-                        {
-                            subdomain.insert(index);
-                            placed = true;
-                            break;
-                        }
-                        ++s_i;
-                    }
+                bad_indices_.reserve(chosen_sets.size());
 
-                    if (!placed)
-                    {
-                        bad_indices_.push_back({index});
-                        chosen_sets.push_back(decomposed_subdomains.find_set(bad_dof_i_to_i[index]));
-                    }
+                for (auto &kv : chosen_sets)
+                {
+                    bad_indices_.emplace_back(kv.second.begin(), kv.second.end());
                 }
+
             }
 
             bad_indices_arrays.clear();
