@@ -1589,20 +1589,15 @@ namespace polysolve::linear
                 D.resize(bad_indices_[i].size(), bad_indices_[i].size());
                 std::vector<Eigen::Triplet<double>> triplets;
 
-                for (int k = 0; k < sparse_A.outerSize(); ++k)
+                for (int k : bad_indices_[i])
                 {
-                    if (bad_indices_[i].count(k) == 0)
-                    {
-                        continue;
-                    }
                     for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
                     {
-
-                        if (bad_indices_[i].count(it.col()) == 0 || bad_indices_[i].count(it.row()) == 0)
+                        auto ind_it = index_mappings[i].find(it.col());
+                        if (ind_it != index_mappings[i].end())
                         {
-                            continue;
+                            triplets.push_back(Eigen::Triplet<double>(index_mappings[i][it.row()], index_mappings[i][it.col()], it.value()));
                         }
-                        triplets.push_back(Eigen::Triplet<double>(index_mappings[i][it.row()], index_mappings[i][it.col()], it.value()));
                     }
                 }
 
