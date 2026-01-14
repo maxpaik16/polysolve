@@ -160,10 +160,12 @@ namespace polysolve::linear
         int start_i, end_i;
 
         Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_A;
+        Eigen::VectorXd local_result;
         std::deque<std::unique_ptr<AbstractSolver>> D_solvers;
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> diag_inv; 
 
         std::vector<std::vector<int>> bad_indices_arrays;
+        std::vector<std::vector<int>> bad_subdomain_assignments;
         std::vector<std::unordered_map<int, int>> index_mappings;
 
 #ifdef POLYSOLVE_WITH_ICHOL
@@ -176,6 +178,9 @@ namespace polysolve::linear
 
         HYPRE_IJMatrix A;
         HYPRE_ParCSRMatrix parcsr_A;
+
+        HYPRE_IJVector ij_x;
+        HYPRE_IJVector ij_b;
 
         double copy_b_and_x_time;
         double set_options_time;
@@ -228,6 +233,25 @@ namespace polysolve::linear
 
             for (int j = 0; j <= k; j++)
                 x += v.col(j) * y(j);
+        }
+
+        void all_gather_vec(const Eigen::VectorXd &local_part, Eigen::VectorXd &global_result)
+        {
+            std::vector<int> recv_counts(num_procs);
+            std::vector<int> displs(num_procs);
+
+            int local_size = end_i - start_i + 1;
+            MPI_Allgather(&local_size, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+            displs[0] = 0;
+            for (int i = 1; i < num_procs; ++i) {
+                displs[i] = displs[i - 1] + recv_counts[i - 1];
+            }
+
+            MPI_Allgatherv(local_part.data(), local_size, MPI_DOUBLE,
+                        global_result.data(), recv_counts.data(), displs.data(), 
+                        MPI_DOUBLE, MPI_COMM_WORLD);
+
         }
 
         void check_matrix_conditioning(const std::string name, const std::set<int>& subdomain);

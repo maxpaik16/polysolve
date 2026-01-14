@@ -58,7 +58,7 @@ int main(int argc, char **argv)
     } 
     else
     {
-        logger->set_level(spdlog::level::trace);
+        logger->set_level(spdlog::level::off);
     }
 
     const char *num_threads_c_str = std::getenv("OMP_NUM_THREADS");
