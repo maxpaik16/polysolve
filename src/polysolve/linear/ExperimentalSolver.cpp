@@ -793,6 +793,7 @@ namespace polysolve::linear
             {
                 bad_dof_threshold *= bad_dof_threshold_inc_factor;
                 bad_dof_threshold = std::min(bad_dof_threshold, max_bad_dof_threshold);
+                logger->trace("Restarting with new bad dof threshold: {}", bad_dof_threshold);
                 prepare_dss(rhs);
                 pcg_solve(rhs, result, par_b, par_x, precond);
                 return;
