@@ -296,11 +296,6 @@ namespace polysolve::linear
             has_matrix_ = false;
         }
 
-        if (jacobi_precond && myid == 0)
-        {
-            diag_inv = sparse_A.diagonal().asDiagonal().inverse();
-        }
-
         if (save_problem && myid == 0)
         {
             logger->trace("Saving problem");
@@ -336,6 +331,11 @@ namespace polysolve::linear
         logger->trace("World size: {}, myid: {}", num_procs, myid);
         logger->trace("start {}, end {}", start_i, end_i);
         local_result.resize(end_i - start_i + 1);
+
+        if (jacobi_precond)
+        {
+            diag_inv = sparse_A.diagonal().segment(start_i, end_i - start_i + 1).asDiagonal().inverse();
+        }
 
         // TODO: More efficient initialization of the Hypre matrix?
         double matrix_copy_time;
@@ -1318,14 +1318,14 @@ namespace polysolve::linear
     void ExperimentalSolver::amg_precond_iter(const HYPRE_Solver &precond, const Eigen::Ref<const VectorXd> eigen_b, Eigen::VectorXd &eigen_x)
     {
 
+        double jacobi_time;
         if (jacobi_precond)
         {
-            if (myid == 0)
-            {
-                eigen_x = diag_inv * (eigen_b - (sparse_A * eigen_x - sparse_A.diagonal().asDiagonal() * eigen_x));
-            }
+            POLYSOLVE_SCOPED_STOPWATCH("jacobi time: ", jacobi_time, *logger);
+            local_result = diag_inv * eigen_b.segment(start_i, end_i - start_i + 1);
 #ifdef HYPRE_WITH_MPI
-            MPI_Bcast(eigen_x.data(), eigen_x.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            all_gather_vec(local_result, eigen_x);
+            // MPI_Bcast(eigen_x.data(), eigen_x.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
 #endif
             return;
         }
