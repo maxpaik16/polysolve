@@ -789,7 +789,7 @@ namespace polysolve::linear
         for (int k = 0; k < max_iter_; ++k)
         {
 
-            if (adapt_bad_dof_threshold && bad_dof_threshold < max_bad_dof_threshold && k >= adaptive_max_iters)
+            if (do_mixed_precond && adapt_bad_dof_threshold && bad_dof_threshold < max_bad_dof_threshold && k >= adaptive_max_iters)
             {
                 bad_dof_threshold *= bad_dof_threshold_inc_factor;
                 bad_dof_threshold = std::min(bad_dof_threshold, max_bad_dof_threshold);
