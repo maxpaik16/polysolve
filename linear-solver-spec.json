@@ -489,7 +489,8 @@
             "problematic_subdomain_precond_only",
             "jacobi_precond",
             "use_problematic_subdomain_for_initial_guess",
-            "decompose_subdomains"
+            "decompose_subdomains",
+            "min_subdomain_size"
         ],
         "doc": "Settings for the Experimental solver."
     },
@@ -689,6 +690,12 @@
         "pointer": "/Experimental/decompose_subdomains",
         "default": false,
         "type": "bool",
-        "doc": "Decompose subdomains for preconditioner"
-    }                         
+        "doc": "Decompose subdomains for preconditioner."
+    },
+    {
+        "pointer": "/Experimental/min_subdomain_size",
+        "default": 1,
+        "type": "int",
+        "doc": "Minimum size of subdomain for preconditioner."
+    }                               
 ]

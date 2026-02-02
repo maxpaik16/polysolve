@@ -203,6 +203,10 @@ namespace polysolve::linear
             {
                 adaptive_max_iters = params["Experimental"]["adaptive_max_iters"];
             }
+            if (params["Experimental"].contains("min_subdomain_size"))
+            {
+                min_subdomain_size = params["Experimental"]["min_subdomain_size"];
+            }
         }
     }
 
@@ -1748,10 +1752,14 @@ namespace polysolve::linear
                 }
 
                 bad_indices_.clear();
-                bad_indices_.reserve(chosen_sets.size());
+                //bad_indices_.reserve(chosen_sets.size());
 
                 for (auto &kv : chosen_sets)
                 {
+                    if (kv.second.size() < min_subdomain_size)
+                    {
+                        continue;
+                    }
                     bad_indices_.emplace_back(kv.second.begin(), kv.second.end());
                 }
 
