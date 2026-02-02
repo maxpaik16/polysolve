@@ -490,7 +490,8 @@
             "jacobi_precond",
             "use_problematic_subdomain_for_initial_guess",
             "decompose_subdomains",
-            "min_subdomain_size"
+            "min_subdomain_size",
+            "max_subdomain_size"
         ],
         "doc": "Settings for the Experimental solver."
     },
