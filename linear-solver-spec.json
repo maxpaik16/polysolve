@@ -697,5 +697,11 @@
         "default": 1,
         "type": "int",
         "doc": "Minimum size of subdomain for preconditioner."
+    },
+    {
+        "pointer": "/Experimental/max_subdomain_size",
+        "default": 1e9,
+        "type": "int",
+        "doc": "Maximum size of subdomain for preconditioner (soft constraint)."
     }                               
 ]

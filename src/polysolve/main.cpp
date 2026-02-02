@@ -19,10 +19,22 @@
 #include <mpi.h>
 #include <HYPRE_struct_ls.h>
 
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/resource.h>
+
 
 void usage(const std::string &executable)
 {
     std::cout << "Usage: " << executable << " solver A_file b_file param_file num_trials [ind_file]" << std::endl;
+}
+
+
+size_t getPeakRSS()
+{
+    struct rusage rusage;
+	getrusage(RUSAGE_SELF, &rusage);
+    return (size_t)(rusage.ru_maxrss * 1024L);
 }
 
 
@@ -122,10 +134,10 @@ int main(int argc, char **argv)
                 for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it)
                 {   
                     triplets.push_back(Eigen::Triplet<double>(it.row(), it.col(), it.value()));
-                    if (it.col() != it.row())
+                    /*if (it.col() != it.row())
                     {
                         triplets.push_back(Eigen::Triplet<double>(it.col(), it.row(), it.value()));
-                    }
+                    }*/
                 }
             }
 
@@ -141,6 +153,8 @@ int main(int argc, char **argv)
             if (b_file != "NONE")
             {
                 std::ifstream b_file_object(b_file);
+                b_file_object.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+                b_file_object.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
                 b.resize(rows);
                 double val;
                 int i = 0;
@@ -194,6 +208,8 @@ int main(int argc, char **argv)
                 }
 
             }   
+
+            logger->trace("RSS: {}", getPeakRSS());
             logger->flush();
             MPI_Abort(MPI_COMM_WORLD, 0);
             int finalized;
@@ -267,6 +283,8 @@ int main(int argc, char **argv)
         }
 
     }   
+
+    logger->trace("RSS: {}", getPeakRSS());
 
     logger->flush();
 	MPI_Abort(MPI_COMM_WORLD, 0);

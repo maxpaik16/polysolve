@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <omp.h>
 
+#include <metis.h>
+
 #include <SymEigsSolver.h>
 #include <MatOp/SparseSymMatProd.h>
 
@@ -206,6 +208,10 @@ namespace polysolve::linear
             if (params["Experimental"].contains("min_subdomain_size"))
             {
                 min_subdomain_size = params["Experimental"]["min_subdomain_size"];
+            }
+            if (params["Experimental"].contains("max_subdomain_size"))
+            {
+                max_subdomain_size = params["Experimental"]["max_subdomain_size"];
             }
         }
     }
@@ -1758,6 +1764,83 @@ namespace polysolve::linear
                 {
                     if (kv.second.size() < min_subdomain_size)
                     {
+                        continue;
+                    }
+                    if (kv.second.size() > max_subdomain_size)
+                    {
+                        std::vector<idx_t> global_to_subdomain(sparse_A.rows(), -1);
+                        for (int i = 0; i < kv.second.size(); ++i)
+                        {
+                            global_to_subdomain[kv.second[i]] = i;
+                        }
+
+                        idx_t nvtxs = kv.second.size();
+                        idx_t ncon = 1;
+
+                        std::vector<idx_t> xadj;
+                        std::vector<idx_t> adjncy;
+                        std::vector<idx_t> adjwgt;
+
+                        xadj.push_back(0);
+
+                        for (int i = 0; i < kv.second.size(); ++i)
+                        {
+                            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, kv.second[i]); it; ++it)
+                            {
+                                if (it.row() >= it.col())
+                                {
+                                    continue;
+                                }
+
+                                if (global_to_subdomain[it.col()] != -1)
+                                {
+                                    adjncy.push_back(global_to_subdomain[it.col()]);
+
+                                    idx_t weight = abs(it.value()) * 1e4 + 1;
+                                    adjwgt.push_back(weight);
+                                }
+                            }
+                            xadj.push_back(adjncy.size());
+                        }
+
+                        idx_t nparts = (nvtxs + max_subdomain_size - 1) / max_subdomain_size;
+                        real_t tolerance = (real_t) max_subdomain_size / ((real_t) nvtxs / (real_t) nparts);
+                        real_t ubvec[1];
+                        ubvec[0] = tolerance;
+
+                        idx_t options[METIS_NOPTIONS];
+                        METIS_SetDefaultOptions(options);
+
+                        idx_t objval;
+                        std::vector<idx_t> part(nvtxs);
+
+                        int status = METIS_PartGraphKway(
+                            &nvtxs,
+                            &ncon,
+                            xadj.data(),
+                            adjncy.data(),
+                            nullptr,
+                            nullptr,
+                            adjwgt.data(),
+                            &nparts,
+                            nullptr,
+                            ubvec,
+                            options,
+                            &objval,
+                            part.data()
+                        );
+
+                        int new_num_subdomains = *std::max_element(part.begin(), part.end()) + 1;
+                        for (int i = 0; i < new_num_subdomains; ++i)
+                        {
+                            bad_indices_.emplace_back();
+                        }
+
+                        for (int i = 0; i < kv.second.size(); ++i)
+                        {
+                            bad_indices_[part[i] + bad_indices_.size() - new_num_subdomains].insert(kv.second[i]);
+                        }
+
                         continue;
                     }
                     bad_indices_.emplace_back(kv.second.begin(), kv.second.end());

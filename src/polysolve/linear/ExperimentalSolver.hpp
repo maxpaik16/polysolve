@@ -144,6 +144,7 @@ namespace polysolve::linear
         bool use_problematic_subdomain_for_initial_guess = false;
         bool decompose_subdomains = false;
         int min_subdomain_size = 1;
+        int max_subdomain_size = 1e9;
 
         int project_d_option = 0;
 

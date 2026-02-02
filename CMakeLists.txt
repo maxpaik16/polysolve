@@ -302,6 +302,9 @@ if(POLYSOLVE_WITH_ICHOL)
     target_compile_definitions(polysolve_linear PUBLIC POLYSOLVE_WITH_ICHOL)
 endif()
 
+find_package(METIS REQUIRED)
+target_link_libraries(polysolve_linear PRIVATE METIS::METIS)
+
 # Spectra (MPL 2.0)
 if(POLYSOLVE_WITH_SPECTRA)
     include(spectra)
