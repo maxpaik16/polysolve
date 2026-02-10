@@ -1580,6 +1580,7 @@ namespace polysolve::linear
 
         const int cutoff_index = sorted_sq_mags.size() * (1 - bad_dof_threshold);
         const double cutoff = sorted_sq_mags(cutoff_index);
+        logger->trace("Problematic threshold: {}", cutoff);
 
         if (cutoff > 0)
         {
