@@ -478,6 +478,7 @@
             "select_bad_dofs_from_rhs",
             "select_bad_dofs_from_row_norms",
             "select_bad_dofs_from_amg",
+            "select_bad_dofs_from_diag",
             "save_selection_criteria",
             "save_problem",
             "save_selected_indices",
@@ -491,7 +492,8 @@
             "use_problematic_subdomain_for_initial_guess",
             "decompose_subdomains",
             "min_subdomain_size",
-            "max_subdomain_size"
+            "max_subdomain_size",
+            "jacobi_precondition_system"
         ],
         "doc": "Settings for the Experimental solver."
     },
@@ -590,6 +592,12 @@
         "default": false,
         "type": "bool",
         "doc": "Whether or not to use amg iterations to select problematic dofs."
+    },
+    {
+        "pointer": "/Experimental/select_bad_dofs_from_diag",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to use diagonal magnitude to select problematic dofs."
     },
     {
         "pointer": "/Experimental/bad_dof_threshold",
@@ -701,8 +709,14 @@
     },
     {
         "pointer": "/Experimental/max_subdomain_size",
-        "default": 1e9,
+        "default": 1000000000,
         "type": "int",
         "doc": "Maximum size of subdomain for preconditioner (soft constraint)."
-    }                               
+    },
+    {
+        "pointer": "/Experimental/jacobi_precondition_system",
+        "default": false,
+        "type": "bool",
+        "doc": "If true, divide system by diagonal before solving."
+    }                                    
 ]

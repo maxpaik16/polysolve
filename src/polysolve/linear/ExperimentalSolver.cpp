@@ -123,6 +123,10 @@ namespace polysolve::linear
             {
                 select_bad_dofs_from_row_norms = params["Experimental"]["select_bad_dofs_from_row_norms"];
             }
+            if (params["Experimental"].contains("select_bad_dofs_from_diag"))
+            {
+                select_bad_dofs_from_diag = params["Experimental"]["select_bad_dofs_from_diag"];
+            }
             if (params["Experimental"].contains("select_bad_dofs_from_amg"))
             {
                 select_bad_dofs_from_amg = params["Experimental"]["select_bad_dofs_from_amg"];
@@ -213,6 +217,10 @@ namespace polysolve::linear
             {
                 max_subdomain_size = params["Experimental"]["max_subdomain_size"];
             }
+            if (params["Experimental"].contains("jacobi_precondition_system"))
+            {
+                jacobi_precondition_system = params["Experimental"]["jacobi_precondition_system"];
+            }
         }
     }
 
@@ -240,6 +248,19 @@ namespace polysolve::linear
                 sparse_A = Ain;
             }
         }
+
+        if (jacobi_precondition_system)
+        {
+            logger->trace("min: {}, max: {}", sparse_A.diagonal().minCoeff(), sparse_A.diagonal().maxCoeff());
+            sqrt_diag_A_inv = sparse_A.diagonal().cwiseSqrt().asDiagonal().inverse();
+            sparse_A = sqrt_diag_A_inv * sparse_A * sqrt_diag_A_inv;
+            logger->trace("symmetry check: {}", sparse_A.isApprox(sparse_A.transpose()));
+            logger->trace("min: {}, max: {}", sqrt_diag_A_inv.diagonal().minCoeff(), sqrt_diag_A_inv.diagonal().maxCoeff());
+            logger->trace("min: {}, max: {}", sparse_A.diagonal().minCoeff(), sparse_A.diagonal().maxCoeff());
+            //Eigen::PardisoLLT<Eigen::SparseMatrix<double, Eigen::RowMajor>> chol_decomp(sparse_A);
+            //bool spd = !(chol_decomp.info() == Eigen::NumericalIssue);
+            //logger->trace("SPD test: {}", spd);
+        }
 #endif
         logger->trace("Num Threads for ExperimentalSolver: {}", num_threads);
         logger->trace("Eigen num threads: {}", Eigen::nbThreads());
@@ -262,11 +283,8 @@ namespace polysolve::linear
             builder.build(levels, 125, dimension_);
             builder.get_dof_remapping(ichol_dof_remapping);
 
-            sparse_A.resize(Ain.rows(), Ain.cols());
-            sparse_A.data().squeeze();
-
             std::vector<Eigen::Triplet<double>> triplets;
-            triplets.reserve(Ain.nonZeros());
+            triplets.reserve(sparse_A.nonZeros());
 
             Eigen::VectorXi old_to_new(ichol_dof_remapping.size());
             for (int i = 0; i < ichol_dof_remapping.size(); ++i)
@@ -274,9 +292,9 @@ namespace polysolve::linear
                 old_to_new(ichol_dof_remapping[i]) = i; 
             }
 
-            for (int k = 0; k < Ain.outerSize(); ++k)
+            for (int k = 0; k < sparse_A.outerSize(); ++k)
             {
-                for (StiffnessMatrix::InnerIterator it(Ain, k); it; ++it)
+                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
                 {   
                     int nod_index_i = it.row() / dimension_;
                     int func_offset_i = it.row() % dimension_;
@@ -312,7 +330,7 @@ namespace polysolve::linear
             std::vector<Eigen::Triplet<double>> triplets;
             triplets.reserve(sparse_A.nonZeros());
 
-            for (int k = 0; k < Ain.outerSize(); ++k)
+            for (int k = 0; k < sparse_A.outerSize(); ++k)
             {
                 for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
                 {   
@@ -586,6 +604,10 @@ namespace polysolve::linear
         }
 #endif
 
+        if (jacobi_precondition_system)
+        {
+            remapped_rhs = sqrt_diag_A_inv * remapped_rhs;
+        }
 
 #ifdef POLYSOLVE_WITH_ICHOL
         if (use_incomplete_cholesky_precond)
@@ -710,6 +732,11 @@ namespace polysolve::linear
             }
         }
 #endif
+
+        if (jacobi_precondition_system)
+        {
+            result = sqrt_diag_A_inv * result;
+        }
 
         /* Destroy preconditioner */
         double destroy_time;
@@ -1426,12 +1453,12 @@ namespace polysolve::linear
         Eigen::VectorXd sq_mags(rhs.size());
         double cutoff_threshold; 
 
-        if (!(select_bad_dofs_from_amg || select_bad_dofs_from_rhs || select_bad_dofs_from_row_norms))
+        if (!(select_bad_dofs_from_amg || select_bad_dofs_from_rhs || select_bad_dofs_from_row_norms || select_bad_dofs_from_diag))
         {
             return; 
         }
 
-        if (select_bad_dofs_from_amg + select_bad_dofs_from_rhs + select_bad_dofs_from_row_norms > 1)
+        if (select_bad_dofs_from_amg + select_bad_dofs_from_rhs + select_bad_dofs_from_row_norms + select_bad_dofs_from_diag > 1)
         {
             logger->warn("Multiple selection methods specified, defaulting to row norms.");   
         }
@@ -1511,6 +1538,22 @@ namespace polysolve::linear
             HYPRE_IJVectorDestroy(test_x);
             HYPRE_IJVectorDestroy(test_b);
             HYPRE_BoomerAMGDestroy(test_precond);
+        }
+
+        if (select_bad_dofs_from_diag)
+        {
+            double select_dofs_from_diag_time;
+            POLYSOLVE_SCOPED_STOPWATCH("select dofs from hess diagonal", select_dofs_from_diag_time, *logger);
+            assert(rhs.size() % dimension_ == 0);
+            if (jacobi_precondition_system)
+            {
+                sq_mags = sqrt_diag_A_inv.diagonal().cwiseInverse();
+            }
+            else
+            {
+                sq_mags = sparse_A.diagonal().cwiseAbs();
+            }
+
         }
 
         if (select_bad_dofs_from_row_norms)

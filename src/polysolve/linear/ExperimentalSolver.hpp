@@ -133,6 +133,7 @@ namespace polysolve::linear
         bool select_bad_dofs_from_rhs = false;
         bool select_bad_dofs_from_row_norms = false;
         bool select_bad_dofs_from_amg = false;
+        bool select_bad_dofs_from_diag = false;
         bool save_selected_indices = false;
         bool save_problem = false;
         bool use_gmres = false;
@@ -145,6 +146,7 @@ namespace polysolve::linear
         bool decompose_subdomains = false;
         int min_subdomain_size = 1;
         int max_subdomain_size = 1e9;
+        bool jacobi_precondition_system = false;
 
         int project_d_option = 0;
 
@@ -165,6 +167,7 @@ namespace polysolve::linear
         Eigen::VectorXd local_result;
         std::deque<std::unique_ptr<AbstractSolver>> D_solvers;
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> diag_inv; 
+        Eigen::DiagonalMatrix<double, Eigen::Dynamic> sqrt_diag_A_inv; 
 
         std::vector<std::vector<int>> bad_indices_arrays;
         std::vector<std::vector<int>> bad_subdomain_assignments;
