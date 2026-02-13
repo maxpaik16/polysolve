@@ -103,6 +103,10 @@ namespace polysolve::linear
             {
                 do_mixed_precond = params["Experimental"]["do_mixed_precond"];
             }
+            if (params["Experimental"].contains("print_subdomain_conditioning"))
+            {
+                print_subdomain_conditioning = params["Experimental"]["print_subdomain_conditioning"];
+            }
             if (params["Experimental"].contains("print_conditioning"))
             {
                 print_conditioning = params["Experimental"]["print_conditioning"];
@@ -1492,8 +1496,15 @@ namespace polysolve::linear
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from amg", select_dofs_from_amg_time, *logger);
             HYPRE_ParVector test_par_b, test_par_x;
             HYPRE_IJVector test_x, test_b;
+            HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &test_b);
+            HYPRE_IJVectorSetObjectType(test_b, HYPRE_PARCSR);
+            HYPRE_IJVectorInitialize(test_b);
+            HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &test_x);
+            HYPRE_IJVectorSetObjectType(test_x, HYPRE_PARCSR);
+            HYPRE_IJVectorInitialize(test_x);
 
             Eigen::VectorXd test_result = Eigen::VectorXd::Random(rhs.size());
+            logger->trace("SUM: {}", test_result.sum());
             Eigen::VectorXd start_result = test_result;
             Eigen::VectorXd test_rhs(rhs.size());
             test_rhs.setZero();
@@ -1521,7 +1532,6 @@ namespace polysolve::linear
                     par_rbms
                 );
             }
-
             HYPRE_BoomerAMGSetMaxIter(test_precond, 5);
             HYPRE_BoomerAMGSetup(test_precond, parcsr_A, test_par_b, test_par_x);
             HYPRE_BoomerAMGSolve(test_precond, parcsr_A, test_par_b, test_par_x);
@@ -1592,6 +1602,8 @@ namespace polysolve::linear
                 }
             }
         }
+
+        logger->trace("selected sum: {}", std::accumulate(bad_indices_[0].begin(), bad_indices_[0].end(), 0));
 
         if (save_selected_indices)
         {
@@ -1669,6 +1681,13 @@ namespace polysolve::linear
                     POLYSOLVE_SCOPED_STOPWATCH("set D from triplets", set_from_triplets_time, *logger);
                     D.setFromTriplets(triplets.begin(), triplets.end());
                     // logger->trace("D symmetric: {}", D.isApprox(D.transpose()));
+                }
+
+                if (print_subdomain_conditioning)
+                {
+                    Eigen::EigenSolver<Eigen::MatrixXd> es(D);
+					auto abs_evs = es.eigenvalues().cwiseAbs();
+                    logger->trace("Condition number of subdomain: {}", abs_evs.maxCoeff() / abs_evs.minCoeff());
                 }
 
                 double d_projection_time;

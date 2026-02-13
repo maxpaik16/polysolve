@@ -40,7 +40,7 @@ size_t getPeakRSS()
 
 int main(int argc, char **argv)
 {
-
+    std::srand((unsigned int) std::time(nullptr));
     if (argc != 6 && argc != 7)
     {
         const std::string executable(argv[0]);

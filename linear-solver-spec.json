@@ -467,6 +467,7 @@
             "do_mixed_precond",
             "dss_in_middle",
             "print_conditioning",
+            "print_subdomain_conditioning",
             "use_incomplete_cholesky_precond",
             "use_absolute_tol",
             "rho",
@@ -550,6 +551,12 @@
         "default": false,
         "type": "bool",
         "doc": "Whether or not to print out conditioning of matrix."
+    },
+    {
+        "pointer": "/Experimental/print_subdomain_conditioning",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to print out conditioning of subdomain matrices."
     },
     {
         "pointer": "/Experimental/use_incomplete_cholesky_precond",

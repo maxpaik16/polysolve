@@ -122,6 +122,7 @@ namespace polysolve::linear
         bool do_mixed_precond = false;
         bool dss_in_middle = true;
         bool print_conditioning = false;
+        bool print_subdomain_conditioning = false;
         bool use_incomplete_cholesky_precond = false;
         bool use_absolute_tol = false;
         bool save_selection_criteria = false;
