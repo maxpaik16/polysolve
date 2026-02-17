@@ -2,15 +2,13 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 #include "Solver.hpp"
-#include "../Utils.hpp"
-#include <Eigen/Core>
-#include <Eigen/Sparse>
+
 #include <vector>
 #include <deque>
-#include <Eigen/SparseCholesky>
-#include <Eigen/PardisoSupport>
 
-#include <HYPRE_utilities.h>
+#include <Eigen/Core>
+#include <Eigen/Sparse>
+
 #include <HYPRE.h>
 #include <HYPRE_parcsr_ls.h>
 #include <HYPRE_parcsr_mv.h>
@@ -26,8 +24,8 @@ namespace mschol {
 
 namespace polysolve::linear
 {
-
     class AbstractSolver {
+
     public:
         virtual void compute(const Eigen::SparseMatrix<double>& A) = 0;
         virtual Eigen::VectorXd solve(const Eigen::VectorXd& b) = 0;
@@ -41,6 +39,7 @@ namespace polysolve::linear
         void compute(const Eigen::SparseMatrix<double>& A) override {
             solver.compute(A);
         }
+
         Eigen::VectorXd solve(const Eigen::VectorXd& b) override {
             return solver.solve(b);
         }
@@ -64,38 +63,13 @@ namespace polysolve::linear
         // Set solver parameters
         virtual void set_parameters(const json &params) override;
 
-        // Retrieve memory information from Pardiso
+        // Retrieve solve information
         virtual void get_info(json &params) const override;
 
+        void check_settings() const;
+
         // Analyze sparsity pattern
-        virtual void analyze_pattern(const StiffnessMatrix &A, const int precond_num) override 
-        { 
-            precond_num_ = precond_num; 
-
-            double eigen_copy_time;
-            {
-                POLYSOLVE_SCOPED_STOPWATCH("eigen matrix copy time", eigen_copy_time, *logger);
-                sparse_A = A;
-            }
-
-#ifdef HYPRE_WITH_MPI
-            if (myid == 0)
-            {
-                int rows, cols, nnzs;
-                rows = sparse_A.rows();
-                cols = sparse_A.cols();
-                nnzs = sparse_A.nonZeros();
-
-                MPI_Bcast(&rows, 1, MPI_INT, 0, MPI_COMM_WORLD);
-                MPI_Bcast(&cols, 1, MPI_INT, 0, MPI_COMM_WORLD);
-                MPI_Bcast(&nnzs, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-                MPI_Bcast(sparse_A.valuePtr(), nnzs, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-                MPI_Bcast(sparse_A.innerIndexPtr(), nnzs, MPI_INT, 0, MPI_COMM_WORLD);
-                MPI_Bcast(sparse_A.outerIndexPtr(), rows + 1, MPI_INT, 0, MPI_COMM_WORLD);
-            }
-#endif
-        }
+        virtual void analyze_pattern(const StiffnessMatrix &A, const int precond_num) override;
 
         // Factorize system matrix
         virtual void factorize(const StiffnessMatrix &A) override;
@@ -106,26 +80,18 @@ namespace polysolve::linear
         // Name of the solver type (for debugging purposes)
         virtual std::string name() const override { return "Experimental"; }
 
-        virtual void set_tolerance(const double tol) override {conv_tol_ = tol;}
-
+        // set convergence tolerance
+        virtual void set_tolerance(const double tol) override { conv_tol_ = tol; }
 
     protected:
-        int dimension_ = 1; // 1 = scalar (Laplace), 2 or 3 = vector (Elasticity)
-        int max_iter_ = 1000;
-        int pre_max_iter_ = 1;
-        double conv_tol_ = 1e-10;
-
-        // solver tuning options
+        // AMG settings
         double theta = 0.5;
         bool nodal_coarsening = false;
         bool interp_rbms = false;
-        bool do_mixed_precond = false;
+        int amg_iters = 1;
+
+        // Hybrid preconditioner settings
         bool dss_in_middle = true;
-        bool print_conditioning = false;
-        bool print_subdomain_conditioning = false;
-        bool use_incomplete_cholesky_precond = false;
-        bool use_absolute_tol = false;
-        bool save_selection_criteria = false;
         double bad_dof_threshold = 0.1;
         double max_bad_dof_threshold = 0.5; 
         bool adapt_bad_dof_threshold = false;
@@ -135,59 +101,78 @@ namespace polysolve::linear
         bool select_bad_dofs_from_row_norms = false;
         bool select_bad_dofs_from_amg = false;
         bool select_bad_dofs_from_diag = false;
-        bool save_selected_indices = false;
-        bool save_problem = false;
-        bool use_gmres = false;
-        bool use_minres = false;
-        int m_ = 10;
-        int amg_iters = 1;
-        bool problematic_subdomain_precond_only = false;
-        bool jacobi_precond = false;
-        bool use_problematic_subdomain_for_initial_guess = false;
         bool decompose_subdomains = false;
         int min_subdomain_size = 1;
         int max_subdomain_size = 1e9;
-        bool jacobi_precondition_system = false;
-
         int project_d_option = 0;
 
+        // General solver settings
+        int dimension_ = 1; // 1 = scalar (Laplace), 2 or 3 = vector (Elasticity)
+        int max_iter_ = 1000;
+        int pre_max_iter_ = 1;
+        double conv_tol_ = 1e-10;
+        bool use_absolute_tol = false;
+        bool do_mixed_precond = false;
+        bool use_incomplete_cholesky_precond = false;
+        bool problematic_subdomain_precond_only = false;
+        bool jacobi_precond = false;
+        bool use_problematic_subdomain_for_initial_guess = false;
+        bool jacobi_precondition_system = false;
+        bool use_gmres = false;
+        bool use_minres = false;
+        int m_ = 10;
+        int num_threads = 1; 
+
+        // Debugging / analysis settings
+        bool print_conditioning = false;
+        bool print_subdomain_conditioning = false;
+        bool save_selection_criteria = false;
+        bool save_selected_indices = false;
+        bool save_problem = false;
+
+        // solve information
         HYPRE_Int num_iterations;
         HYPRE_Complex final_res_norm;
 
-        int num_threads = 1; 
-
     private:
         bool has_matrix_ = false;
-        int precond_num_;
 
+        // MPI rank distribution 
         int myid = 0;
         int num_procs = 1;
         int start_i, end_i;
 
-        Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_A;
+        // temporary buffer
         Eigen::VectorXd local_result;
-        std::deque<std::unique_ptr<AbstractSolver>> D_solvers;
+
+        // problem-specific data
+        Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_A;
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> diag_inv; 
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> sqrt_diag_A_inv; 
 
+        // Hypre variables
+        HYPRE_IJMatrix A;
+        HYPRE_ParCSRMatrix parcsr_A;
+        HYPRE_IJVector ij_x;
+        HYPRE_IJVector ij_b;
+
+        // hybrid preconditioner data
+        std::deque<std::unique_ptr<AbstractSolver>> D_solvers;
         std::vector<std::vector<int>> bad_indices_arrays;
         std::vector<std::vector<int>> bad_subdomain_assignments;
         std::vector<std::unordered_map<int, int>> index_mappings;
 
 #ifdef POLYSOLVE_WITH_ICHOL
+        // incomplete cholesky variables
         std::shared_ptr<mschol::ichol_precond> inc_chol_precond; 
         boost::property_tree::ptree pt;
         Eigen::VectorXi ichol_dof_remapping;
         double rho = 1.01;
         int remap_dof(const int index);
+        void setup_ichol_precond();
 #endif
 
-        HYPRE_IJMatrix A;
-        HYPRE_ParCSRMatrix parcsr_A;
-
-        HYPRE_IJVector ij_x;
-        HYPRE_IJVector ij_b;
-
+        // timing variables
         double copy_b_and_x_time;
         double set_options_time;
         double actual_solve_time;
@@ -195,113 +180,119 @@ namespace polysolve::linear
         double bad_dof_selection_time;
         double dss_factorization_time;
         double dss_assembly_time;
+        double eigen_copy_time;
+        double ichol_fac_time;
+        double matrix_destroy_time;
+        double matrix_copy_time;
+        double copy_to_ranks_time;
+        double amg_setup_time;
+        double destroy_time;
+        double ichol_time;
+        double loop_time;
+        double jacobi_time;
+        double solve_time;
+        double copy_to_time;
+        double copy_from_time;
+        double dss_step_time;
+        double select_dofs_from_rhs_time;
+        double select_dofs_from_amg_time;
+        double select_dofs_from_diag_time;
+        double select_dofs_from_row_norms_time;
+        double set_from_triplets_time;
+        double d_projection_time;
+        double matmul_time;
+        double prepare_dss_time;
+        double decomp_time;
+        double print_cond_time;
 
-        void custom_mixed_precond_iter(const HYPRE_Solver &precond, const Eigen::VectorXd &r, Eigen::VectorXd &z);
-        void amg_precond_iter(const HYPRE_Solver &precond, const Ref<const VectorXd> b, Eigen::VectorXd &x);
-        void dss_precond_iter(const Eigen::VectorXd &z, const Eigen::VectorXd &r, Eigen::VectorXd &next_z);
+        // factorization helpers
+        void save_problem_to_file(const std::string& file_name);
+        void partition_ranks();
+        void copy_matrix_to_hypre();
+
+        // solve helpers
+        void init_hypre_vectors();
+        void recover_solution(Eigen::Ref<VectorXd> result);
+        void check_smallest_eigenvalue();
+
+        // hybrid preconditioner helpers
+        void assemble_D(int bad_i, int i, Eigen::SparseMatrix<double>& D);
+        void project_D(Eigen::SparseMatrix<double>& D);
+        void build_index_mappings();
+        void decompose_subdomains_to_disjoint_subsets();
+        void partition_subdomain(std::vector<int>& subdomain);
+        void share_bad_subdomains();
+        void load_balance_subdomains();
+
+        // matrix multiplication
         void matmul(Eigen::VectorXd &x, Eigen::SparseMatrix<double, Eigen::RowMajor> &A, Eigen::VectorXd &result);
-        void prepare_dss(Eigen::VectorXd &rhs);
 
-
-        void GeneratePlaneRotation(double &dx, double &dy, double &cs, double &sn)
-        {
-            if (dy == 0.0) {
-                cs = 1.0;
-                sn = 0.0;
-            } else if (abs(dy) > abs(dx)) {
-                double temp = dx / dy;
-                sn = 1.0 / sqrt( 1.0 + temp*temp );
-                cs = temp * sn;
-            } else {
-                double temp = dy / dx;
-                cs = 1.0 / sqrt( 1.0 + temp*temp );
-                sn = temp * cs;
-            }
-        }
-
-        void ApplyPlaneRotation(double &dx, double &dy, double &cs, double &sn)
-        {
-            double temp  =  cs * dx + sn * dy;
-            dy = -sn * dx + cs * dy;
-            dx = temp;
-        }
-
-        void Update(Eigen::VectorXd &x, int k, Eigen::MatrixXd &h, Eigen::VectorXd &s, Eigen::MatrixXd &v)
-        {
-            Eigen::VectorXd y = s;
-
-            // Backsolve:  
-            for (int i = k; i >= 0; i--) {
-                y(i) /= h(i,i);
-                for (int j = i - 1; j >= 0; j--)
-                    y(j) -= h(j,i) * y(i);
-            }
-
-            for (int j = 0; j <= k; j++)
-                x += v.col(j) * y(j);
-        }
-
-        void all_gather_vec(const Eigen::VectorXd &local_part, Eigen::VectorXd &global_result)
-        {
-            std::vector<int> recv_counts(num_procs);
-            std::vector<int> displs(num_procs);
-
-            int local_size = end_i - start_i + 1;
-            MPI_Allgather(&local_size, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-
-            displs[0] = 0;
-            for (int i = 1; i < num_procs; ++i) {
-                displs[i] = displs[i - 1] + recv_counts[i - 1];
-            }
-
-            MPI_Allgatherv(local_part.data(), local_size, MPI_DOUBLE,
-                        global_result.data(), recv_counts.data(), displs.data(), 
-                        MPI_DOUBLE, MPI_COMM_WORLD);
-
-        }
-
+        // log system conditioning
         void check_matrix_conditioning(const std::string name, const std::set<int>& subdomain);
         void check_matrix_conditioning(const std::string name, const Eigen::MatrixXd& mat);
 
+        // preconditioning functions
+        void custom_mixed_precond_iter(const HYPRE_Solver &precond, Eigen::VectorXd &r, Eigen::VectorXd &z);
+        void amg_precond_iter(const HYPRE_Solver &precond, Eigen::VectorXd& b, Eigen::VectorXd &x);
+        void dss_precond_iter(const Eigen::VectorXd &z, const Eigen::VectorXd &r, Eigen::VectorXd &next_z);
+
+        // hybrid preconditioner preparation functions
+        void prepare_dss(Eigen::VectorXd &rhs);
         void select_bad_indices(Eigen::VectorXd &rhs);
         void factorize_submatrix();
 
+        // GMRES helpers
+        void GeneratePlaneRotation(double &dx, double &dy, double &cs, double &sn);
+        void ApplyPlaneRotation(double &dx, double &dy, double &cs, double &sn);
+        void Update(Eigen::VectorXd &x, int k, Eigen::MatrixXd &h, Eigen::VectorXd &s, Eigen::MatrixXd &v);
+
+        // MPI communication helper
+        void all_gather_vec(const Eigen::VectorXd &local_part, Eigen::VectorXd &global_result);
+
+        // Krylov solve methods
         void pcg_solve(Eigen::VectorXd &rhs, Eigen::VectorXd &result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond);
         void minres_solve(Eigen::VectorXd &rhs, Eigen::VectorXd &result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond);
         void gmres_solve(Eigen::VectorXd &rhs, Eigen::VectorXd &result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond);
 
-        
     };
 
-    struct disjointSet{
-    std::vector<int> parent, rank;
-    disjointSet(int n){
-        rank.assign(n, 0);
-        for (int i = 0; i < n; i++)
-            parent.push_back(i);
-    }
+    struct disjointSet {
+        std::vector<int> parent, rank;
 
-    int find_set(int v){
-        if(parent[v]!=v)
-            parent[v] = find_set(parent[v]);
-        return parent[v];
-    }
-
-    void union_set(int x,int y){
-        if (x == y)
+        disjointSet(int n) 
         {
-            return;
+            rank.assign(n, 0);
+            for (int i = 0; i < n; i++)
+                parent.push_back(i);
         }
-        x = find_set(x);
-        y = find_set(y);
-        if (rank[x] > rank[y])
-            parent[y] = x;
-        else{
-            parent[x] = y;
-            if(rank[x]==rank[y])
-                rank[y]++;
+
+        int find_set(int v) 
+        {
+            if (parent[v] != v)
+                parent[v] = find_set(parent[v]);
+
+            return parent[v];
         }
-    }
+
+        void union_set(int x,int y) 
+        {
+            if (x == y)
+            {
+                return;
+            }
+
+            x = find_set(x);
+            y = find_set(y);
+
+            if (rank[x] > rank[y])
+                parent[y] = x;
+            else
+            {
+                parent[x] = y;
+                if(rank[x] == rank[y])
+                    rank[y]++;
+            }
+        }
 };
 
 

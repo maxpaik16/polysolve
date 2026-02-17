@@ -2,8 +2,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 #include "ExperimentalSolver.hpp"
 
-#include <HYPRE_krylov.h>
-#include <HYPRE_utilities.h>
+#include "../Utils.hpp"
 
 #ifdef POLYSOLVE_WITH_ICHOL
 #include "cholesky.h"
@@ -13,11 +12,14 @@
 
 #include <iostream>
 #include <fstream>
-#include <cstdlib>
 #include <unordered_map>
-#include <omp.h>
 
 #include <metis.h>
+
+#include <HYPRE_utilities.h>
+
+#include <Eigen/SparseCholesky>
+#include <Eigen/PardisoSupport>
 
 #include <SymEigsSolver.h>
 #include <MatOp/SparseSymMatProd.h>
@@ -29,7 +31,7 @@ namespace polysolve::linear
 
     ExperimentalSolver::ExperimentalSolver()
     {
-        precond_num_ = 0;
+        // set number of threads from OMP environment variable
         const char* num_threads_val = std::getenv("OMP_NUM_THREADS");
         if (num_threads_val)
         {
@@ -37,12 +39,13 @@ namespace polysolve::linear
         }
 
 #ifdef HYPRE_WITH_MPI
+        // check if MPI is initialized
         int done_already;
-
         MPI_Initialized(&done_already);
+
         if (!done_already)
         {
-            /* Initialize MPI */
+            // Initialize MPI 
             int argc = 1;
             char name[] = "";
             char *argv[] = {name};
@@ -51,16 +54,13 @@ namespace polysolve::linear
             MPI_Comm_rank(MPI_COMM_WORLD, &myid);
             MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
         }
+
+        // get MPI rank information
         MPI_Comm_rank(MPI_COMM_WORLD, &myid);
         MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
-        if (myid == 0)
-        {
-            Eigen::setNbThreads(num_threads);
-        }
-        else 
-        {
-            Eigen::setNbThreads(1);
-        }
+
+        Eigen::setNbThreads(1);
+        
 #else
         Eigen::setNbThreads(num_threads);
 #endif
@@ -228,6 +228,36 @@ namespace polysolve::linear
         }
     }
 
+    void ExperimentalSolver::check_settings() const
+    {
+        if (myid != 0)
+        {
+            return;
+        }
+
+        if (use_gmres || use_minres)
+        {
+            log_and_throw_error(*logger, "Only PCG has been thoroughly tested!");
+        }
+        if (use_incomplete_cholesky_precond && num_procs != 1)
+        {
+            log_and_throw_error(*logger, "Incomplete cholesky preconditioning incompatible with multiple MPI ranks!");
+        }
+        if (decompose_subdomains && print_conditioning)
+        {
+            log_and_throw_error(*logger, "Matrix conditioning check requires non-decomposed subdomain!");
+        }
+
+        if (!dss_in_middle)
+        {
+            logger->warn("Only DSS in middle has been thoroughly tested!");
+        }
+        if (project_d_option != 0)
+        {
+            logger->warn("Using relatively untested subdomain projection option ({})!", project_d_option);
+        }
+    }
+
     void ExperimentalSolver::get_info(json &params) const
     {
         params["num_iterations"] = num_iterations;
@@ -236,8 +266,40 @@ namespace polysolve::linear
 
     ////////////////////////////////////////////////////////////////////////////////
 
+    void ExperimentalSolver::analyze_pattern(const StiffnessMatrix &A, const int precond_num) 
+    { 
+        check_settings();
+
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("eigen matrix copy time", eigen_copy_time, *logger);
+            sparse_A = A;
+        }
+
+#ifdef HYPRE_WITH_MPI
+        if (myid == 0)
+        {
+            // send matrix to other MPI ranks
+            int rows, cols, nnzs;
+            rows = sparse_A.rows();
+            cols = sparse_A.cols();
+            nnzs = sparse_A.nonZeros();
+
+            MPI_Bcast(&rows, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Bcast(&cols, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Bcast(&nnzs, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+            MPI_Bcast(sparse_A.valuePtr(), nnzs, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            MPI_Bcast(sparse_A.innerIndexPtr(), nnzs, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Bcast(sparse_A.outerIndexPtr(), rows + 1, MPI_INT, 0, MPI_COMM_WORLD);
+        }
+#endif
+    }
+
     void ExperimentalSolver::factorize(const StiffnessMatrix &Ain)
     {
+        logger->trace("Num Threads for ExperimentalSolver: {}", num_threads);
+        logger->trace("Eigen num threads: {}", Eigen::nbThreads());
+
 #ifdef HYPRE_WITH_MPI
         if (myid == 0)
         {
@@ -246,7 +308,6 @@ namespace polysolve::linear
         } 
         else 
         {
-            double eigen_copy_time;
             {
                 POLYSOLVE_SCOPED_STOPWATCH("eigen matrix copy time", eigen_copy_time, *logger);
                 sparse_A = Ain;
@@ -255,72 +316,16 @@ namespace polysolve::linear
 
         if (jacobi_precondition_system)
         {
-            logger->trace("min: {}, max: {}", sparse_A.diagonal().minCoeff(), sparse_A.diagonal().maxCoeff());
+            logger->trace("Using Jacobi preconditioned system. Diagonal info: min: {}, max: {}", sparse_A.diagonal().minCoeff(), sparse_A.diagonal().maxCoeff());
             sqrt_diag_A_inv = sparse_A.diagonal().cwiseSqrt().asDiagonal().inverse();
             sparse_A = sqrt_diag_A_inv * sparse_A * sqrt_diag_A_inv;
-            logger->trace("symmetry check: {}", sparse_A.isApprox(sparse_A.transpose()));
-            logger->trace("min: {}, max: {}", sqrt_diag_A_inv.diagonal().minCoeff(), sqrt_diag_A_inv.diagonal().maxCoeff());
-            logger->trace("min: {}, max: {}", sparse_A.diagonal().minCoeff(), sparse_A.diagonal().maxCoeff());
-            //Eigen::PardisoLLT<Eigen::SparseMatrix<double, Eigen::RowMajor>> chol_decomp(sparse_A);
-            //bool spd = !(chol_decomp.info() == Eigen::NumericalIssue);
-            //logger->trace("SPD test: {}", spd);
         }
 #endif
-        logger->trace("Num Threads for ExperimentalSolver: {}", num_threads);
-        logger->trace("Eigen num threads: {}", Eigen::nbThreads());
 
 #ifdef POLYSOLVE_WITH_ICHOL
-        double ichol_fac_time;
-        if (use_incomplete_cholesky_precond)
-        {
-            POLYSOLVE_SCOPED_STOPWATCH("ichol factorization time", ichol_fac_time, *logger);
-            pt.put<double>("nei_num.value", rho);
-            pt.put<double>("alpha.value", 1e-4);
-            pt.put<std::ptrdiff_t>("max_su_size.value", 64);
-            pt.put<int>("num_threads.value", num_threads);
-            pt.put<int>("subst_num_threads.value", num_threads);
-            
-            Eigen::Matrix<size_t, -1, -1> test_elements = elements_.cast<size_t>();
-            mschol::chol_hierarchy builder(test_elements.transpose(), positions_.transpose(), positions_.cols() == 2 ? "trig" : "tets");
-            
-            std::vector<std::shared_ptr<mschol::chol_level>> levels;
-            builder.build(levels, 125, dimension_);
-            builder.get_dof_remapping(ichol_dof_remapping);
-
-            std::vector<Eigen::Triplet<double>> triplets;
-            triplets.reserve(sparse_A.nonZeros());
-
-            Eigen::VectorXi old_to_new(ichol_dof_remapping.size());
-            for (int i = 0; i < ichol_dof_remapping.size(); ++i)
-            {
-                old_to_new(ichol_dof_remapping[i]) = i; 
-            }
-
-            for (int k = 0; k < sparse_A.outerSize(); ++k)
-            {
-                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-                {   
-                    int nod_index_i = it.row() / dimension_;
-                    int func_offset_i = it.row() % dimension_;
-                    int new_i = dimension_ * old_to_new(nod_index_i) + func_offset_i;
-
-                    int nod_index_j = it.col() / dimension_;
-                    int func_offset_j = it.col() % dimension_;
-                    int new_j = dimension_ * old_to_new(nod_index_j) + func_offset_j;
-                    
-                    triplets.push_back(Eigen::Triplet<double>(new_i, new_j, it.value()));
-                }
-            }
-
-            sparse_A.setFromTriplets(triplets.begin(), triplets.end());
-
-            inc_chol_precond = std::make_shared<mschol::ichol_precond>(levels, pt);
-            inc_chol_precond->analyse_pattern(sparse_A);
-            inc_chol_precond->factorize(sparse_A);
-        }
+        setup_ichol_precond();
 #endif
 
-        double matrix_destroy_time;
         if (has_matrix_)
         {
             POLYSOLVE_SCOPED_STOPWATCH("matrix destroy time", matrix_destroy_time, *logger);
@@ -330,79 +335,18 @@ namespace polysolve::linear
 
         if (save_problem && myid == 0)
         {
-            logger->trace("Saving problem");
-            std::vector<Eigen::Triplet<double>> triplets;
-            triplets.reserve(sparse_A.nonZeros());
-
-            for (int k = 0; k < sparse_A.outerSize(); ++k)
-            {
-                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-                {   
-                    triplets.push_back(Eigen::Triplet<double>(it.row(), it.col(), it.value()));
-                }
-            }
-
-            std::ofstream file("A.mat", std::ios_base::app);
-            file << sparse_A.rows() << " " << sparse_A.cols() << " " << sparse_A.nonZeros() << std::endl;
-            for (auto &trip : triplets)
-            {
-                file << trip.row() << " " << trip.col() << " " << trip.value() << " ";
-            }
-            file << std::endl;
-            file.close();
+            save_problem_to_file("A.mat");
         }
-
         has_matrix_ = true;
 
-        const HYPRE_Int rows = sparse_A.rows();
-        const HYPRE_Int cols = sparse_A.cols();
-
-        int local_size = rows / num_procs;
-        start_i = myid == 0 ? 0 : local_size * myid + myid;
-        end_i = myid == (num_procs - 1) ? rows - 1 : start_i + local_size;
-        logger->trace("World size: {}, myid: {}", num_procs, myid);
-        logger->trace("start {}, end {}", start_i, end_i);
-        local_result.resize(end_i - start_i + 1);
+        partition_ranks();
 
         if (jacobi_precond)
         {
             diag_inv = sparse_A.diagonal().segment(start_i, end_i - start_i + 1).asDiagonal().inverse();
         }
 
-        // TODO: More efficient initialization of the Hypre matrix?
-        double matrix_copy_time;
-        {
-            POLYSOLVE_SCOPED_STOPWATCH("copy matrix time", matrix_copy_time, *logger);
-
-#ifdef HYPRE_WITH_MPI
-            HYPRE_IJMatrixCreate(MPI_COMM_WORLD, start_i, end_i, start_i, end_i, &A);
-#else
-            HYPRE_IJMatrixCreate(0, 0, rows - 1, 0, cols - 1, &A);
-#endif
-            // HYPRE_IJMatrixSetPrintLevel(A, 2);
-            HYPRE_IJMatrixSetObjectType(A, HYPRE_PARCSR);
-            HYPRE_IJMatrixInitialize(A);
-
-            for (HYPRE_Int k = 0; k < sparse_A.outerSize(); ++k)
-            {
-                HYPRE_Int row[1]; 
-                int counter = 0;
-                std::vector<HYPRE_Int> cols;
-                std::vector<double> vals;
-                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-                {
-                    ++counter;
-                    row[0] = it.row();
-                    cols.push_back((HYPRE_Int)it.col());
-                    vals.push_back(it.value());
-                }
-                HYPRE_Int n_cols[1] = {counter};
-                HYPRE_IJMatrixSetValues(A, 1, n_cols, row, cols.data(), vals.data());
-            }
-            HYPRE_IJMatrixAssemble(A);
-            HYPRE_IJMatrixGetObject(A, (void **)&parcsr_A);
-        }
-
+        copy_matrix_to_hypre();
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -597,7 +541,6 @@ namespace polysolve::linear
         Eigen::VectorXd remapped_result = result;
 
 #ifdef HYPRE_WITH_MPI
-        double copy_to_ranks_time;
         if (myid == 0)
         {
             POLYSOLVE_SCOPED_STOPWATCH("copy problem to other ranks time", copy_to_ranks_time, *logger);
@@ -634,22 +577,7 @@ namespace polysolve::linear
 
         HYPRE_ParVector par_b;
         HYPRE_ParVector par_x;
-
-#ifdef HYPRE_WITH_MPI
-        HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &ij_x);
-#else
-        HYPRE_IJVectorCreate(0, 0, rhs.size() - 1, &x);
-#endif
-        HYPRE_IJVectorSetObjectType(ij_x, HYPRE_PARCSR);
-        HYPRE_IJVectorInitialize(ij_x);
-
-#ifdef HYPRE_WITH_MPI
-        HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &ij_b);
-#else
-        HYPRE_IJVectorCreate(0, 0, rhs.size() - 1, &ij_b);
-#endif
-        HYPRE_IJVectorSetObjectType(ij_b, HYPRE_PARCSR);
-        HYPRE_IJVectorInitialize(ij_b);
+        init_hypre_vectors();
 
         {
             POLYSOLVE_SCOPED_STOPWATCH("copy x and b", copy_b_and_x_time, *logger);
@@ -668,7 +596,7 @@ namespace polysolve::linear
         std::vector<HYPRE_IJVector> rbms(num_rbms);
         
         {
-            POLYSOLVE_SCOPED_STOPWATCH("set options", set_options_time, *logger);
+            POLYSOLVE_SCOPED_STOPWATCH("set AMG options", set_options_time, *logger);
             HypreBoomerAMG_SetDefaultOptions(precond);
             if (dimension_ > 1)
             {
@@ -692,7 +620,6 @@ namespace polysolve::linear
 #endif
         }
 
-        double amg_setup_time;
         {
             POLYSOLVE_SCOPED_STOPWATCH("AMG setup time", amg_setup_time, *logger);
             HYPRE_BoomerAMGSetup(precond, parcsr_A, par_b, par_x);
@@ -726,24 +653,9 @@ namespace polysolve::linear
         logger->debug("Experimental solver Final Relative Residual Norm: {}", final_res_norm);
 
         result = remapped_result;
-
-#ifdef POLYSOLVE_WITH_ICHOL
-        if (use_incomplete_cholesky_precond)
-        {
-            for (int i = 0; i < result.size(); ++i)
-            {
-                result(remap_dof(i)) = remapped_result(i);
-            }
-        }
-#endif
-
-        if (jacobi_precondition_system)
-        {
-            result = sqrt_diag_A_inv * result;
-        }
+        recover_solution(result);
 
         /* Destroy preconditioner */
-        double destroy_time;
         {
             POLYSOLVE_SCOPED_STOPWATCH("destroy time", destroy_time, *logger);
             HYPRE_BoomerAMGDestroy(precond);
@@ -808,7 +720,6 @@ namespace polysolve::linear
             z.setZero();
 
 #ifdef POLYSOLVE_WITH_ICHOL
-            double ichol_time;
             if (use_incomplete_cholesky_precond)
             {
                 POLYSOLVE_SCOPED_STOPWATCH("ichol time: ", ichol_time, *logger);
@@ -826,7 +737,6 @@ namespace polysolve::linear
             old_gamma = gamma;
         }
 
-        double loop_time;
         for (int k = 0; k < max_iter_; ++k)
         {
 
@@ -858,39 +768,7 @@ namespace polysolve::linear
             if (alpha <= 0.0)
             {
                 logger->debug("Experimental solver error: negative or zero alpha value. gamma: {}, sdotp: {}", gamma, sdotp);
-                
-                if (false && myid == 0 && bad_indices_.size() > 0 && bad_indices_[0].size() > 0)
-                {
-                    polysolve::StiffnessMatrix A_copy = sparse_A;
-                    Spectra::SparseSymMatProd<double> op(A_copy);
-                    Spectra::SymEigsSolver<double, Spectra::SMALLEST_ALGE, Spectra::SparseSymMatProd<double>> eigs(&op, 1, 6);
-
-                    eigs.init();
-                    int nconv = eigs.compute();
-                    Eigen::VectorXd eigenvalues;
-                    Eigen::MatrixXd eigenvectors;
-                    if (eigs.info() == Spectra::SUCCESSFUL)
-                    {
-                        eigenvalues = eigs.eigenvalues();
-                        eigenvectors = eigs.eigenvectors();
-
-                        Eigen::VectorXd bad_evec = eigenvectors.col(0);
-                        Eigen::VectorXd projected_bad_evec = bad_evec;
-                        for (int i = 0; i < projected_bad_evec.size(); ++i)
-                        {
-                            if (bad_indices_[0].count(i) == 0)
-                            {
-                                projected_bad_evec(i) = 0;
-                            }
-                        }
-                        logger->debug("eigenvalue found: {}, evec norm: {}, projected evec norm: {}", eigenvalues(0), bad_evec.norm(), projected_bad_evec.norm()); 
-                    }
-                    else
-                    {
-                        logger->debug("could not find eigenvalue");
-                    }
-                }
-                
+                check_smallest_eigenvalue();
                 break;
             } 
             else if (alpha < __DBL_MIN__)
@@ -930,7 +808,6 @@ namespace polysolve::linear
             z.setZero(); 
 
 #ifdef POLYSOLVE_WITH_ICHOL
-            double ichol_time;
             if (use_incomplete_cholesky_precond)
             {
                 POLYSOLVE_SCOPED_STOPWATCH("ichol time: ", ichol_time, *logger);
@@ -954,353 +831,15 @@ namespace polysolve::linear
 
     void ExperimentalSolver::minres_solve(Eigen::VectorXd &rhs, Eigen::VectorXd &result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond)
     {
-        // TODO
-        double beta, eta, gamma0, gamma1, sigma0, sigma1;
-        double alpha, delta, rho1, rho2, rho3, norm_goal;
-
-        Eigen::VectorXd v1;
-        matmul(result, sparse_A, v1);
-        v1 = rhs - v1;
-
-        Eigen::VectorXd q(rhs.size());
-        Eigen::VectorXd v0(rhs.size());
-        Eigen::VectorXd w0(rhs.size());
-        Eigen::VectorXd w1(rhs.size());
-        Eigen::VectorXd u1(rhs.size());
-        u1.setZero();
-        //Eigen::SimplicialLDLT<Eigen::SparseMatrix<double, Eigen::RowMajor>> test_precond;
-        //test_precond.compute(sparse_A);
-        custom_mixed_precond_iter(precond, v1, u1);     
-        //u1 = test_precond.solve(v1);   
-        //u1 = v1;      
-    
-        eta = beta = sqrt(u1.dot(v1));
-        logger->trace("Starting eta: {}", eta);
-        gamma0 = gamma1 = 1.;
-        sigma0 = sigma1 = 0.;
-
-        norm_goal = conv_tol_;
-        if (!use_absolute_tol)
-        {
-            norm_goal *= eta;
-        }
-
-        if (eta <= norm_goal)
-        {
-            num_iterations = 0;
-            if (false && eta > 0)
-            {
-                logger->trace("ETA TO SMALL");
-                Eigen::VectorXd e(rhs.size());
-                Eigen::VectorXd out(rhs.size());
-                Eigen::MatrixXd M(rhs.size(), rhs.size());
-                for (int k = 0; k < rhs.size(); ++k)
-                {
-                    e.setZero();
-                    out.setZero();
-                    e(k) = 1;
-                    amg_precond_iter(precond, e, out);
-                    M.col(k) = out;
-                }
-
-                std::ofstream M_file("fail_M.mat");
-                M_file << M;
-                M_file.close();
-                exit(1);
-            }
-            return;
-        }
-
-        for (num_iterations = 1; num_iterations <= max_iter_; ++num_iterations)
-        {
-            v1 /= beta;
-            u1 /= beta;
-
-            matmul(u1, sparse_A, q);
-            alpha = u1.dot(q);
-
-            if (num_iterations > 1)
-            {
-                q -= beta * v0;
-            }
-
-            v0 = q - alpha * v1;
-
-            delta = gamma1 * alpha - gamma0 * sigma1 * beta;
-            rho3 = sigma0 * beta;
-            rho2 = sigma1 * alpha + gamma0 * gamma1 * beta;
-
-            q.setZero();
-            //q = test_precond.solve(v0);
-            custom_mixed_precond_iter(precond, v0, q);
-            //q = v0;
-
-            bool v0_isnan = false;
-            bool q_isnan = false;
-            for (int i = 0; i < q.size(); ++i)
-            {
-                if (std::isnan(v0(i)))
-                {
-                    v0_isnan = true;
-                }
-                if (std::isnan(q(i)))
-                {
-                    q_isnan = true;
-                }
-            }
-            beta = sqrt(v0.dot(q));
-            rho1 = std::hypot(delta, beta);
-            logger->trace("DOT: {}", v0.dot(q));
-            logger->trace("v0 norm: {}", v0.norm());
-            logger->trace("q norm: {}", q.norm());
-
-            if (false && v0.dot(q) < 0)
-            {
-                std::ofstream v0_file("fail_v0.mat");
-                v0_file << v0;
-                v0_file.close();
-                exit(1);
-            }
-
-            logger->trace("RHO1: {}", rho1);
-            logger->trace("BETA: {}", beta);
-            logger->trace("DELTA: {}", delta);
-            logger->trace("qnan: {}", q_isnan);
-            logger->trace("v0nan: {}", v0_isnan);
-
-            if (v0_isnan)
-            {
-                std::ofstream A_file("fail_A.mat");
-                A_file << sparse_A;
-                A_file.close();
-
-                std::ofstream b_file("fail_b.mat");
-                b_file << rhs;
-                b_file.close();
-
-                std::ofstream v0_file("fail_v0.mat");
-                v0_file << v0;
-                v0_file.close();
-
-                Eigen::VectorXd e(rhs.size());
-                Eigen::VectorXd out(rhs.size());
-                Eigen::MatrixXd M(rhs.size(), rhs.size());
-                for (int k = 0; k < rhs.size(); ++k)
-                {
-                    e.setZero();
-                    out.setZero();
-                    e(k) = 1;
-                    amg_precond_iter(precond, e, out);
-                    M.col(k) = out;
-                }
-
-                std::ofstream M_file("fail_M.mat");
-                M_file << M;
-                M_file.close();
-
-                for (int k = 0; k < rhs.size(); ++k)
-                {
-                    e.setZero();
-                    out.setZero();
-                    e(k) = 1;
-                    custom_mixed_precond_iter(precond, e, out);
-                    M.col(k) = out;
-                }
-
-                std::ofstream Mdss_file("fail_M_dss.mat");
-                Mdss_file << M;
-                Mdss_file.close();
-
-                std::cout << "HEYO" << std::endl;
-
-                HYPRE_Int cgrid[9120];
-                HYPRE_BoomerAMGGetGridHierarchy(precond, cgrid);
-
-                Eigen::VectorXi eigen_cgrid(9120);
-                for (int i = 0; i < 9120; ++i)
-                {
-                    eigen_cgrid(i) = cgrid[i];
-                }
-                std::cout << "HEYO2" << std::endl;
-                std::ofstream cgrid_file("fail_cgrid.mat");
-                cgrid_file << eigen_cgrid;
-                cgrid_file.close();
-
-                std::cout << "HEYO3" << std::endl;
-
-                exit(1);
-            }
-
-            if (num_iterations == 1)
-            {
-                w0 = u1 / rho1;
-            }
-            else if (num_iterations == 2)
-            {
-                w0 = 1 / rho1 * u1 - rho2 / rho1 * w1;
-            }
-            else
-            {
-                w0 = -rho3 / rho1 * w0 - rho2 / rho1 * w1;
-                w0 += u1 / rho1;
-            }
-
-            gamma0 = gamma1;
-            gamma1 = delta/rho1;
-
-            result += gamma1 * eta * w0;
-
-            sigma0 = sigma1;
-            sigma1 = beta/rho1;
-
-            eta = -sigma1 * eta;
-            logger->trace("MINRES eta: {}, loop iter: {}", eta, num_iterations);
-            Eigen::VectorXd A_times_x;
-            matmul(result, sparse_A, A_times_x);
-            Eigen::VectorXd r0 = rhs - A_times_x;
-            logger->trace("RESIDUAL: {}", r0.norm());
-
-            if (fabs(eta) <= norm_goal)
-            {
-                return;
-            }
-
-            Eigen::VectorXd temp;
-            temp = u1;
-            u1 = q;
-            q = temp;
-            
-            temp = v0;
-            v0 = v1;
-            v1 = temp;
-
-            temp = w0;
-            w0 = w1;
-            w1 = temp;
-        }
-
+        log_and_throw_error(*logger, "MINRES not yet implemented!");
     }
 
     void ExperimentalSolver::gmres_solve(Eigen::VectorXd &rhs, Eigen::VectorXd &result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond)
     {
-        double residual;
-        int i, j = 1, k;
-        Eigen::VectorXd s(m_ + 1);
-        Eigen::VectorXd cs(m_ + 1);
-        Eigen::VectorXd sn(m_ + 1);
-        Eigen::VectorXd w(rhs.size());
-
-        Eigen::VectorXd z(rhs.size());
-        custom_mixed_precond_iter(precond, rhs, z);
-        
-
-        double normb = z.norm();
-        Eigen::VectorXd A_times_x;
-        matmul(result, sparse_A, A_times_x);
-        Eigen::VectorXd r0 = rhs - A_times_x;
-
-        Eigen::VectorXd r(rhs.size());
-        custom_mixed_precond_iter(precond, r0, r);
-        
-
-        double beta = r.norm();
-        if (normb == 0)
-        {
-            normb = 1;
-        }
-
-        residual = beta;
-        if (!use_absolute_tol)
-        {
-            residual /= normb;
-        }
-
-        if (residual < conv_tol_)
-        {
-            num_iterations = 0;
-            return;
-        }
-
-        Eigen::MatrixXd V(rhs.size(), m_ + 1);
-        Eigen::MatrixXd H(m_ + 2, m_ + 1);
-        H.setZero();
-
-        while (j <= max_iter_)
-        {
-            V.col(0) = r / beta;
-            s.setZero();
-            s(0) = beta;
-
-            for (i = 0; i < m_ && j <= max_iter_; ++i, ++j)
-            {
-                Eigen::VectorXd A_times_vi;
-                Eigen::VectorXd vi = V.col(i);
-                matmul(vi, sparse_A, A_times_vi);
-
-                custom_mixed_precond_iter(precond, A_times_vi, w);
-                
-
-                for (k = 0; k <= i; ++k)
-                {
-                    H(k, i) = w.dot(V.col(k));
-                    w -= H(k, i) * V.col(k);
-                }
-
-                H(i+1, i) = w.norm();
-                V.col(i + 1) = w / H(i+1, i);
-                
-                for (k = 0; k < i; ++k)
-                {
-                    ApplyPlaneRotation(H(k,i), H(k+1,i), cs(k), sn(k));
-                }
-        
-                GeneratePlaneRotation(H(i,i), H(i+1,i), cs(i), sn(i));
-                ApplyPlaneRotation(H(i,i), H(i+1,i), cs(i), sn(i));
-                ApplyPlaneRotation(s(i), s(i+1), cs(i), sn(i));
-                
-                residual = abs(s(i+1));
-                if (!use_absolute_tol)
-                {
-                    residual /= normb;
-                }
-
-                logger->trace("GMRES. Iter: {}, Residual: {}", j, residual);
-
-                if (residual < conv_tol_) 
-                {
-                    Update(result, i, H, s, V);
-                    num_iterations = j;
-                    return;
-                }
-            }
-
-            Update(result, m_ - 1, H, s, V);
-            matmul(result, sparse_A, A_times_x);
-            r0 = rhs - A_times_x;
-
-            r.setZero();
-            custom_mixed_precond_iter(precond, r0, r);
-            
-            beta = r.norm();
-
-            residual = beta;
-            if (!use_absolute_tol)
-            {
-                residual /= normb;
-            }
-
-            if (residual < conv_tol_) 
-            {
-                num_iterations = j;
-                return;
-            }
-
-        }
-        num_iterations = max_iter_;
+        log_and_throw_error(*logger, "GMRES not yet implemented!");
     }
 
-
-    void ExperimentalSolver::custom_mixed_precond_iter(const HYPRE_Solver &precond, const Eigen::VectorXd &r, Eigen::VectorXd &z)
+    void ExperimentalSolver::custom_mixed_precond_iter(const HYPRE_Solver &precond, Eigen::VectorXd &r, Eigen::VectorXd &z)
     {        
         Eigen::VectorXd z1(r.size());
         Eigen::VectorXd z2(r.size());
@@ -1339,7 +878,8 @@ namespace polysolve::linear
             dss_precond_iter(z1, r, z2);
             Eigen::VectorXd A_times_z2;
             matmul(z2, sparse_A, A_times_z2);
-            amg_precond_iter(precond, r - A_times_z2, z3);
+            Eigen::VectorXd curr_r = r - A_times_z2;
+            amg_precond_iter(precond, curr_r, z3);
             z = z2 + z3;
         }
         else
@@ -1349,17 +889,17 @@ namespace polysolve::linear
             dss_precond_iter(z0, r, z1);
             Eigen::VectorXd A_times_z1;
             matmul(z2, sparse_A, A_times_z1);
-            amg_precond_iter(precond, r - A_times_z1, z2);
+            Eigen::VectorXd curr_r = r - A_times_z1;
+            amg_precond_iter(precond, curr_r, z2);
             z2 += z1;
             dss_precond_iter(z2, r, z);
         }
 
     }
 
-    void ExperimentalSolver::amg_precond_iter(const HYPRE_Solver &precond, const Eigen::Ref<const VectorXd> eigen_b, Eigen::VectorXd &eigen_x)
+    void ExperimentalSolver::amg_precond_iter(const HYPRE_Solver &precond, Eigen::VectorXd& eigen_b, Eigen::VectorXd &eigen_x)
     {
 
-        double jacobi_time;
         if (jacobi_precond)
         {
             POLYSOLVE_SCOPED_STOPWATCH("jacobi time: ", jacobi_time, *logger);
@@ -1373,17 +913,18 @@ namespace polysolve::linear
 
         HYPRE_ParVector par_x;
         HYPRE_ParVector par_b;
-        double solve_time;
-        double copy_to_time;
-        double copy_from_time;
 #ifdef HYPRE_WITH_MPI
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
 
         {
             POLYSOLVE_SCOPED_STOPWATCH("copy to hypre time: ", copy_to_time, *logger);
-            eigen_to_hypre_par_vec(par_x, ij_x, eigen_x, start_i, end_i);
-            eigen_to_hypre_par_vec(par_b, ij_b, eigen_b, start_i, end_i);
+            HYPRE_IJVectorSetData(ij_x, eigen_x.data() + start_i);
+            HYPRE_IJVectorSetData(ij_b, eigen_b.data() + start_i);
+            HYPRE_IJVectorAssemble(ij_x);
+            HYPRE_IJVectorGetObject(ij_x, (void **)&par_x);
+            HYPRE_IJVectorAssemble(ij_b);
+            HYPRE_IJVectorGetObject(ij_b, (void **)&par_b);
         }
 
         {
@@ -1393,14 +934,14 @@ namespace polysolve::linear
 
         {
             POLYSOLVE_SCOPED_STOPWATCH("copy from hypre time: ", copy_from_time, *logger);
-            hypre_vec_to_eigen(ij_x, eigen_x, start_i, end_i, num_procs);
+            local_result = eigen_x.segment(start_i, end_i - start_i + 1);
+            all_gather_vec(local_result, eigen_x);
         }
         
     }
 
     void ExperimentalSolver::dss_precond_iter(const Eigen::VectorXd &z, const Eigen::VectorXd &r, Eigen::VectorXd &next_z)
     {
-        double dss_step_time;
         {
             POLYSOLVE_SCOPED_STOPWATCH("dss step time: ", dss_step_time, *logger);
 
@@ -1412,9 +953,7 @@ namespace polysolve::linear
             {
                 auto &subdomain = bad_indices_arrays[index];
 
-                double resize_time;
                 {
-                    //POLYSOLVE_SCOPED_STOPWATCH("test resize: ", resize_time, *logger);
                     sub_rhs.resize(subdomain.size());
                     sub_result.resize(subdomain.size());
                 }
@@ -1424,9 +963,7 @@ namespace polysolve::linear
                     sub_rhs(index_mappings[index_counter][subdomain[i]]) = r(subdomain[i]) - sparse_A.row(subdomain[i]).dot(z);
                 }
 
-                double d_solve_time;
                 {
-                    //POLYSOLVE_SCOPED_STOPWATCH("D solve time", d_solve_time, *logger);
                     sub_result = D_solvers[index_counter]->solve(sub_rhs);
                 }
 
@@ -1448,6 +985,58 @@ namespace polysolve::linear
         int nod_index = index / dimension_;
         int func_offset = index % dimension_;
         return dimension_ * ichol_dof_remapping(nod_index) + func_offset;
+    }
+
+    void ExperimentalSolver::setup_ichol_precond()
+    {
+        double ichol_fac_time;
+        if (use_incomplete_cholesky_precond)
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("ichol factorization time", ichol_fac_time, *logger);
+            pt.put<double>("nei_num.value", rho);
+            pt.put<double>("alpha.value", 1e-4);
+            pt.put<std::ptrdiff_t>("max_su_size.value", 64);
+            pt.put<int>("num_threads.value", num_threads);
+            pt.put<int>("subst_num_threads.value", num_threads);
+            
+            Eigen::Matrix<size_t, -1, -1> test_elements = elements_.cast<size_t>();
+            mschol::chol_hierarchy builder(test_elements.transpose(), positions_.transpose(), positions_.cols() == 2 ? "trig" : "tets");
+            
+            std::vector<std::shared_ptr<mschol::chol_level>> levels;
+            builder.build(levels, 125, dimension_);
+            builder.get_dof_remapping(ichol_dof_remapping);
+
+            std::vector<Eigen::Triplet<double>> triplets;
+            triplets.reserve(sparse_A.nonZeros());
+
+            Eigen::VectorXi old_to_new(ichol_dof_remapping.size());
+            for (int i = 0; i < ichol_dof_remapping.size(); ++i)
+            {
+                old_to_new(ichol_dof_remapping[i]) = i; 
+            }
+
+            for (int k = 0; k < sparse_A.outerSize(); ++k)
+            {
+                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+                {   
+                    int nod_index_i = it.row() / dimension_;
+                    int func_offset_i = it.row() % dimension_;
+                    int new_i = dimension_ * old_to_new(nod_index_i) + func_offset_i;
+
+                    int nod_index_j = it.col() / dimension_;
+                    int func_offset_j = it.col() % dimension_;
+                    int new_j = dimension_ * old_to_new(nod_index_j) + func_offset_j;
+                    
+                    triplets.push_back(Eigen::Triplet<double>(new_i, new_j, it.value()));
+                }
+            }
+
+            sparse_A.setFromTriplets(triplets.begin(), triplets.end());
+
+            inc_chol_precond = std::make_shared<mschol::ichol_precond>(levels, pt);
+            inc_chol_precond->analyse_pattern(sparse_A);
+            inc_chol_precond->factorize(sparse_A);
+        }
     }
 #endif
 
@@ -1472,7 +1061,6 @@ namespace polysolve::linear
 
         if (select_bad_dofs_from_rhs)
         {
-            double select_dofs_from_rhs_time;
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from rhs", select_dofs_from_rhs_time, *logger);
             assert(rhs.size() % dimension_ == 0);
             for (int i = 0; i < rhs.size() / dimension_; ++i)
@@ -1492,7 +1080,6 @@ namespace polysolve::linear
 
         if (select_bad_dofs_from_amg)
         {
-            double select_dofs_from_amg_time;
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from amg", select_dofs_from_amg_time, *logger);
             HYPRE_ParVector test_par_b, test_par_x;
             HYPRE_IJVector test_x, test_b;
@@ -1504,7 +1091,6 @@ namespace polysolve::linear
             HYPRE_IJVectorInitialize(test_x);
 
             Eigen::VectorXd test_result = Eigen::VectorXd::Random(rhs.size());
-            logger->trace("SUM: {}", test_result.sum());
             Eigen::VectorXd start_result = test_result;
             Eigen::VectorXd test_rhs(rhs.size());
             test_rhs.setZero();
@@ -1539,7 +1125,6 @@ namespace polysolve::linear
             hypre_vec_to_eigen(test_x, test_result, start_i, end_i, num_procs);
 
             assert(rhs.size() % dimension_ == 0);
-            Eigen::VectorXd sq_mags(rhs.size());
             for (int i = 0; i < rhs.size(); ++i)
             {
                 sq_mags(i) = abs(test_result(i) / start_result(i));
@@ -1552,7 +1137,6 @@ namespace polysolve::linear
 
         if (select_bad_dofs_from_diag)
         {
-            double select_dofs_from_diag_time;
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from hess diagonal", select_dofs_from_diag_time, *logger);
             assert(rhs.size() % dimension_ == 0);
             if (jacobi_precondition_system)
@@ -1568,7 +1152,6 @@ namespace polysolve::linear
 
         if (select_bad_dofs_from_row_norms)
         {
-            double select_dofs_from_row_norms_time;
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from hess row norms", select_dofs_from_row_norms_time, *logger);
             assert(rhs.size() % dimension_ == 0);
             for (int i = 0; i < rhs.size(); ++i)
@@ -1602,8 +1185,6 @@ namespace polysolve::linear
                 }
             }
         }
-
-        logger->trace("selected sum: {}", std::accumulate(bad_indices_[0].begin(), bad_indices_[0].end(), 0));
 
         if (save_selected_indices)
         {
@@ -1640,48 +1221,14 @@ namespace polysolve::linear
                     D_solvers.push_back(std::make_unique<EigenWrapper<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>>>());
                 }
             }
-            //logger->trace("H symmetric: {}", sparse_A.isApprox(sparse_A.transpose()));
 
-            index_mappings.clear();
-            index_mappings.resize(bad_subdomain_assignments[myid].size());
+            build_index_mappings();
 
             int i_counter = 0;
             for (int i : bad_subdomain_assignments[myid])
             {
-                int j_counter = 0;
-                for (auto j : bad_indices_[i])
-                {
-                    index_mappings[i_counter][j] = j_counter;
-                    ++j_counter;
-                }
-                ++i_counter;
-            }
-
-            i_counter = 0;
-            for (int i : bad_subdomain_assignments[myid])
-            {
                 Eigen::SparseMatrix<double> D;
-                D.resize(bad_indices_[i].size(), bad_indices_[i].size());
-                std::vector<Eigen::Triplet<double>> triplets;
-
-                for (int k : bad_indices_[i])
-                {
-                    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-                    {
-                        auto ind_it = index_mappings[i_counter].find(it.col());
-                        if (ind_it != index_mappings[i_counter].end())
-                        {
-                            triplets.push_back(Eigen::Triplet<double>(index_mappings[i_counter][it.row()], index_mappings[i_counter][it.col()], it.value()));
-                        }
-                    }
-                }
-
-                double set_from_triplets_time;
-                {
-                    POLYSOLVE_SCOPED_STOPWATCH("set D from triplets", set_from_triplets_time, *logger);
-                    D.setFromTriplets(triplets.begin(), triplets.end());
-                    // logger->trace("D symmetric: {}", D.isApprox(D.transpose()));
-                }
+                assemble_D(i_counter, i, D);
 
                 if (print_subdomain_conditioning)
                 {
@@ -1690,41 +1237,7 @@ namespace polysolve::linear
                     logger->trace("Condition number of subdomain: {}", abs_evs.maxCoeff() / abs_evs.minCoeff());
                 }
 
-                double d_projection_time;
-                {
-                    POLYSOLVE_SCOPED_STOPWATCH("project D", d_projection_time, *logger);
-                    if (project_d_option == 1)
-                    {
-                        // make diagonally dominant row by row
-                        for (int ri = 0; ri < D.rows(); ++ri)
-                        {
-                            double row_sum = D.row(ri).cwiseAbs().sum();
-                            D.coeffRef(ri, ri) = row_sum;
-                        }
-                    }
-                    else if (project_d_option == 2 && D.rows() > 0)
-                    {
-                        Eigen::SelfAdjointEigenSolver<Eigen::SparseMatrix<double>>
-                            eigensolver(D);
-                        if (eigensolver.info() != Eigen::Success) {
-                            logger->trace("unable to project matrix onto positive definite cone");
-                        }
-                        // Check if all eigen values are positive.
-                        // The eigenvalues are sorted in increasing order.
-                        else if (eigensolver.eigenvalues()[0] <= 0.0) 
-                        {
-
-                            Eigen::DiagonalMatrix<double, Eigen::Dynamic> Diag(eigensolver.eigenvalues());
-                            for (int ri = 0; ri < Diag.rows(); ri++) {
-                                if (Diag.diagonal()[ri] <= 0.0) {
-                                    Diag.diagonal()[ri] = 0;
-                                } 
-                            }
-                            Eigen::MatrixXd dense_D = eigensolver.eigenvectors() * Diag * eigensolver.eigenvectors().transpose();
-                            D = dense_D.sparseView(); 
-                        }
-                    }
-                }
+                project_D(D);
 
                 {
                     POLYSOLVE_SCOPED_STOPWATCH("factorize D", dss_factorization_time, *logger);
@@ -1732,15 +1245,14 @@ namespace polysolve::linear
                 }
 
                 ++i_counter;
-            
             }
+            
             MPI_Barrier(MPI_COMM_WORLD);
         }
     }
 
     void ExperimentalSolver::matmul(Eigen::VectorXd &x, Eigen::SparseMatrix<double, Eigen::RowMajor> &A, Eigen::VectorXd &result)
     {
-        double matmul_time;
         POLYSOLVE_SCOPED_STOPWATCH("matmul time", matmul_time, *logger);
 #ifdef HYPRE_WITH_MPI
         if (num_procs == 1)
@@ -1752,7 +1264,7 @@ namespace polysolve::linear
             result.resize(x.size());
             for (int i = 0; i < end_i - start_i + 1; ++i)
             {
-                local_result(i) = sparse_A.row(start_i + i).dot(x);
+                local_result(i) = A.row(start_i + i).dot(x);
             }
 
             all_gather_vec(local_result, result);
@@ -1764,13 +1276,13 @@ namespace polysolve::linear
 
     void ExperimentalSolver::prepare_dss(Eigen::VectorXd &rhs)
     {
-        double prepare_dss_time;
         POLYSOLVE_SCOPED_STOPWATCH("prepare dss time", prepare_dss_time, *logger);
 #ifdef HYPRE_WITH_MPI
         if (myid == 0) 
         {
 #endif
             select_bad_indices(rhs);
+
             if (save_selected_indices)
             {
                 std::ofstream file;
@@ -1786,135 +1298,483 @@ namespace polysolve::linear
                 file.close();
             }
 
-            double decomp_time;
             if (decompose_subdomains)
             {
-                POLYSOLVE_SCOPED_STOPWATCH("subdomain decomposition time", decomp_time, *logger);
-                std::vector<int> all_bad_dofs;
-                std::vector<int> global_to_local(sparse_A.rows(), -1);
-                for (auto &subdomain : bad_indices_)
-                {
-                    for (auto index : subdomain)
-                    {
-                        global_to_local[index] = all_bad_dofs.size();
-                        all_bad_dofs.push_back(index);
-                    }
-                }
-
-                disjointSet decomposed_subdomains(all_bad_dofs.size());
-
-                for (int k : all_bad_dofs)
-                {
-                    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-                    {
-                        if (global_to_local[it.col()] != -1)
-                        {
-                            decomposed_subdomains.union_set(global_to_local[it.row()], global_to_local[it.col()]);
-                        }
-                    }
-                }
-
-                std::unordered_map<int, std::vector<int>> chosen_sets;
-                for (auto index : all_bad_dofs)
-                {
-                    chosen_sets[decomposed_subdomains.find_set(global_to_local[index])].push_back(index);
-                }
-
-                bad_indices_.clear();
-                //bad_indices_.reserve(chosen_sets.size());
-
-                for (auto &kv : chosen_sets)
-                {
-                    if (kv.second.size() < min_subdomain_size)
-                    {
-                        continue;
-                    }
-                    if (kv.second.size() > max_subdomain_size)
-                    {
-                        std::vector<idx_t> global_to_subdomain(sparse_A.rows(), -1);
-                        for (int i = 0; i < kv.second.size(); ++i)
-                        {
-                            global_to_subdomain[kv.second[i]] = i;
-                        }
-
-                        idx_t nvtxs = kv.second.size();
-                        idx_t ncon = 1;
-
-                        std::vector<idx_t> xadj;
-                        std::vector<idx_t> adjncy;
-                        std::vector<idx_t> adjwgt;
-
-                        xadj.push_back(0);
-
-                        for (int i = 0; i < kv.second.size(); ++i)
-                        {
-                            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, kv.second[i]); it; ++it)
-                            {
-                                if (it.row() >= it.col())
-                                {
-                                    continue;
-                                }
-
-                                if (global_to_subdomain[it.col()] != -1)
-                                {
-                                    adjncy.push_back(global_to_subdomain[it.col()]);
-
-                                    idx_t weight = abs(it.value()) * 1e4 + 1;
-                                    adjwgt.push_back(weight);
-                                }
-                            }
-                            xadj.push_back(adjncy.size());
-                        }
-
-                        idx_t nparts = (nvtxs + max_subdomain_size - 1) / max_subdomain_size;
-                        real_t tolerance = (real_t) max_subdomain_size / ((real_t) nvtxs / (real_t) nparts);
-                        real_t ubvec[1];
-                        ubvec[0] = tolerance;
-
-                        idx_t options[METIS_NOPTIONS];
-                        METIS_SetDefaultOptions(options);
-
-                        idx_t objval;
-                        std::vector<idx_t> part(nvtxs);
-
-                        int status = METIS_PartGraphKway(
-                            &nvtxs,
-                            &ncon,
-                            xadj.data(),
-                            adjncy.data(),
-                            nullptr,
-                            nullptr,
-                            adjwgt.data(),
-                            &nparts,
-                            nullptr,
-                            ubvec,
-                            options,
-                            &objval,
-                            part.data()
-                        );
-
-                        int new_num_subdomains = *std::max_element(part.begin(), part.end()) + 1;
-                        for (int i = 0; i < new_num_subdomains; ++i)
-                        {
-                            bad_indices_.emplace_back();
-                        }
-
-                        for (int i = 0; i < kv.second.size(); ++i)
-                        {
-                            bad_indices_[part[i] + bad_indices_.size() - new_num_subdomains].insert(kv.second[i]);
-                        }
-
-                        continue;
-                    }
-                    bad_indices_.emplace_back(kv.second.begin(), kv.second.end());
-                }
-
+                decompose_subdomains_to_disjoint_subsets();
             }
             
 #ifdef HYPRE_WITH_MPI
         }
 #endif
 
+        share_bad_subdomains();
+        load_balance_subdomains();
+
+        factorize_submatrix();
+
+        if (myid == 0 && print_conditioning)
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("print conditioning time", print_cond_time, *logger);
+            check_matrix_conditioning("Hessian", sparse_A);
+            check_matrix_conditioning("Preconditioned Hessian", bad_indices_[0]);
+        }
+    }
+
+    void ExperimentalSolver::check_matrix_conditioning(const std::string name, const std::set<int>& subdomain)
+    {
+        if (subdomain.size() == 0)
+        {
+            return;
+        }
+
+        Eigen::MatrixXd preconditioned_A = sparse_A;
+
+        for (int col = 0; col < preconditioned_A.cols(); ++col)
+        {
+            Eigen::VectorXd sub_rhs;
+            Eigen::VectorXd sub_result;
+            sub_rhs.resize(subdomain.size());
+            sub_result.resize(subdomain.size());
+
+            int i_counter = 0;
+            for (auto &i : subdomain)
+            {
+                sub_rhs(i_counter) = preconditioned_A(i, col);
+                ++i_counter;
+            }
+
+            sub_result = D_solvers[0]->solve(sub_rhs);
+            i_counter = 0;
+            for (auto &i : subdomain)
+            {
+                preconditioned_A(i, col) = sub_result(i_counter);
+                ++i_counter;
+            }
+        }
+
+        check_matrix_conditioning(name, preconditioned_A);
+    }
+
+    void ExperimentalSolver::GeneratePlaneRotation(double &dx, double &dy, double &cs, double &sn)
+    {
+        if (dy == 0.0) {
+            cs = 1.0;
+            sn = 0.0;
+        } else if (abs(dy) > abs(dx)) {
+            double temp = dx / dy;
+            sn = 1.0 / sqrt( 1.0 + temp*temp );
+            cs = temp * sn;
+        } else {
+            double temp = dy / dx;
+            cs = 1.0 / sqrt( 1.0 + temp*temp );
+            sn = temp * cs;
+        }
+    }
+
+    void ExperimentalSolver::ApplyPlaneRotation(double &dx, double &dy, double &cs, double &sn)
+    {
+        double temp  =  cs * dx + sn * dy;
+        dy = -sn * dx + cs * dy;
+        dx = temp;
+    }
+
+    void ExperimentalSolver::Update(Eigen::VectorXd &x, int k, Eigen::MatrixXd &h, Eigen::VectorXd &s, Eigen::MatrixXd &v)
+    {
+        Eigen::VectorXd y = s;
+
+        // Backsolve:  
+        for (int i = k; i >= 0; i--) {
+            y(i) /= h(i,i);
+            for (int j = i - 1; j >= 0; j--)
+                y(j) -= h(j,i) * y(i);
+        }
+
+        for (int j = 0; j <= k; j++)
+            x += v.col(j) * y(j);
+    }
+
+    void ExperimentalSolver::all_gather_vec(const Eigen::VectorXd &local_part, Eigen::VectorXd &global_result)
+    {
+        std::vector<int> recv_counts(num_procs);
+        std::vector<int> displs(num_procs);
+
+        int local_size = end_i - start_i + 1;
+        MPI_Allgather(&local_size, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+        displs[0] = 0;
+        for (int i = 1; i < num_procs; ++i) {
+            displs[i] = displs[i - 1] + recv_counts[i - 1];
+        }
+
+        MPI_Allgatherv(local_part.data(), local_size, MPI_DOUBLE,
+                    global_result.data(), recv_counts.data(), displs.data(), 
+                    MPI_DOUBLE, MPI_COMM_WORLD);
+
+    }
+
+    void ExperimentalSolver::check_matrix_conditioning(const std::string name, const Eigen::MatrixXd& mat)
+    {
+        Eigen::BDCSVD<Eigen::MatrixXd> svd(mat);
+        double cond = svd.singularValues()(0) 
+        / svd.singularValues()(svd.singularValues().size()-1);
+
+        Eigen::LDLT<Eigen::MatrixXd> chol_decomp(mat);
+        bool spd = !(chol_decomp.info() == Eigen::NumericalIssue);
+        bool symm = mat.isApprox(mat.transpose());
+        bool isPos = chol_decomp.isPositive();
+
+        logger->trace("Analyzing {}...", name);
+        logger->trace("SPD: {}, Symm: {}, isPos: {}", spd, symm, isPos);
+        logger->trace("Condition number: {}", cond);
+    }
+
+    void ExperimentalSolver::save_problem_to_file(const std::string& file_name)
+    {
+        logger->trace("Saving problem to {}", file_name);
+        std::vector<Eigen::Triplet<double>> triplets;
+        triplets.reserve(sparse_A.nonZeros());
+
+        for (int k = 0; k < sparse_A.outerSize(); ++k)
+        {
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+            {   
+                triplets.push_back(Eigen::Triplet<double>(it.row(), it.col(), it.value()));
+            }
+        }
+
+        std::ofstream file(file_name, std::ios_base::app);
+        file << sparse_A.rows() << " " << sparse_A.cols() << " " << sparse_A.nonZeros() << std::endl;
+        for (auto &trip : triplets)
+        {
+            file << trip.row() << " " << trip.col() << " " << trip.value() << " ";
+        }
+        file << std::endl;
+        file.close();
+    }
+
+    void ExperimentalSolver::partition_ranks()
+    {
+        int local_size = sparse_A.rows() / num_procs;
+        start_i = myid == 0 ? 0 : local_size * myid + myid;
+        end_i = myid == (num_procs - 1) ? sparse_A.rows() - 1 : start_i + local_size;
+
+        logger->trace("World size: {}, myid: {}", num_procs, myid);
+        logger->trace("start {}, end {}", start_i, end_i);
+        local_result.resize(end_i - start_i + 1);
+    }
+
+    void ExperimentalSolver::copy_matrix_to_hypre()
+    {
+        POLYSOLVE_SCOPED_STOPWATCH("copy matrix time", matrix_copy_time, *logger);
+
+#ifdef HYPRE_WITH_MPI
+        HYPRE_IJMatrixCreate(MPI_COMM_WORLD, start_i, end_i, start_i, end_i, &A);
+#else
+        HYPRE_IJMatrixCreate(0, 0, sparse_A.rows() - 1, 0, sparse_A.cols() - 1, &A);
+#endif
+        HYPRE_IJMatrixSetObjectType(A, HYPRE_PARCSR);
+        HYPRE_IJMatrixInitialize(A);
+
+        for (HYPRE_Int k = start_i; k <= end_i; ++k)
+        {
+            HYPRE_Int row[1]; 
+            int counter = 0;
+            std::vector<HYPRE_Int> cols;
+            std::vector<double> vals;
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+            {
+                ++counter;
+                row[0] = it.row();
+                cols.push_back((HYPRE_Int)it.col());
+                vals.push_back(it.value());
+            }
+            HYPRE_Int n_cols[1] = {counter};
+            HYPRE_IJMatrixSetValues(A, 1, n_cols, row, cols.data(), vals.data());
+        }
+        HYPRE_IJMatrixAssemble(A);
+        HYPRE_IJMatrixGetObject(A, (void **)&parcsr_A);
+    }
+
+    void ExperimentalSolver::init_hypre_vectors()
+    {
+#ifdef HYPRE_WITH_MPI
+        HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &ij_x);
+#else
+        HYPRE_IJVectorCreate(0, 0, rhs.size() - 1, &x);
+#endif
+        HYPRE_IJVectorSetObjectType(ij_x, HYPRE_PARCSR);
+        HYPRE_IJVectorInitialize(ij_x);
+        HYPRE_IJVectorInitializeShell(ij_x);
+
+#ifdef HYPRE_WITH_MPI
+        HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &ij_b);
+#else
+        HYPRE_IJVectorCreate(0, 0, rhs.size() - 1, &ij_b);
+#endif
+        HYPRE_IJVectorSetObjectType(ij_b, HYPRE_PARCSR);
+        HYPRE_IJVectorInitialize(ij_b);
+        HYPRE_IJVectorInitializeShell(ij_b);
+    }
+
+    void ExperimentalSolver::recover_solution(Eigen::Ref<VectorXd> result)
+    {
+#ifdef POLYSOLVE_WITH_ICHOL
+        if (use_incomplete_cholesky_precond)
+        {
+            for (int i = 0; i < result.size(); ++i)
+            {
+                result(remap_dof(i)) = result(i);
+            }
+        }
+#endif
+        if (jacobi_precondition_system)
+        {
+            result = sqrt_diag_A_inv * result;
+        }
+    }
+
+    void ExperimentalSolver::check_smallest_eigenvalue()
+    {
+        return;
+        if (myid == 0 && bad_indices_.size() > 0 && bad_indices_[0].size() > 0)
+        {
+            polysolve::StiffnessMatrix A_copy = sparse_A;
+            Spectra::SparseSymMatProd<double> op(A_copy);
+            Spectra::SymEigsSolver<double, Spectra::SMALLEST_ALGE, Spectra::SparseSymMatProd<double>> eigs(&op, 1, 6);
+
+            eigs.init();
+            int nconv = eigs.compute();
+            Eigen::VectorXd eigenvalues;
+            Eigen::MatrixXd eigenvectors;
+            if (eigs.info() == Spectra::SUCCESSFUL)
+            {
+                eigenvalues = eigs.eigenvalues();
+                eigenvectors = eigs.eigenvectors();
+
+                Eigen::VectorXd bad_evec = eigenvectors.col(0);
+                Eigen::VectorXd projected_bad_evec = bad_evec;
+                for (int i = 0; i < projected_bad_evec.size(); ++i)
+                {
+                    if (bad_indices_[0].count(i) == 0)
+                    {
+                        projected_bad_evec(i) = 0;
+                    }
+                }
+                logger->debug("eigenvalue found: {}, evec norm: {}, projected evec norm: {}", eigenvalues(0), bad_evec.norm(), projected_bad_evec.norm()); 
+            }
+            else
+            {
+                logger->debug("could not find eigenvalue");
+            }
+        }
+    }
+
+    void ExperimentalSolver::project_D(Eigen::SparseMatrix<double>& D)
+    {
+        POLYSOLVE_SCOPED_STOPWATCH("project D", d_projection_time, *logger);
+        if (project_d_option == 1)
+        {
+            // make diagonally dominant row by row
+            for (int ri = 0; ri < D.rows(); ++ri)
+            {
+                double row_sum = D.row(ri).cwiseAbs().sum();
+                D.coeffRef(ri, ri) = row_sum;
+            }
+        }
+        else if (project_d_option == 2 && D.rows() > 0)
+        {
+            Eigen::SelfAdjointEigenSolver<Eigen::SparseMatrix<double>>
+                eigensolver(D);
+            if (eigensolver.info() != Eigen::Success) {
+                logger->trace("unable to project matrix onto positive definite cone");
+            }
+            // Check if all eigen values are positive.
+            // The eigenvalues are sorted in increasing order.
+            else if (eigensolver.eigenvalues()[0] <= 0.0) 
+            {
+
+                Eigen::DiagonalMatrix<double, Eigen::Dynamic> Diag(eigensolver.eigenvalues());
+                for (int ri = 0; ri < Diag.rows(); ri++) {
+                    if (Diag.diagonal()[ri] <= 0.0) {
+                        Diag.diagonal()[ri] = 0;
+                    } 
+                }
+                Eigen::MatrixXd dense_D = eigensolver.eigenvectors() * Diag * eigensolver.eigenvectors().transpose();
+                D = dense_D.sparseView(); 
+            }
+        }
+    }
+
+    void ExperimentalSolver::assemble_D(int bad_i, int i, Eigen::SparseMatrix<double>& D)
+    {
+        D.resize(bad_indices_[i].size(), bad_indices_[i].size());
+        std::vector<Eigen::Triplet<double>> triplets;
+        for (int k : bad_indices_[i])
+        {
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+            {
+                auto ind_it = index_mappings[bad_i].find(it.col());
+                if (ind_it != index_mappings[bad_i].end())
+                {
+                    triplets.push_back(Eigen::Triplet<double>(index_mappings[bad_i][it.row()], index_mappings[bad_i][it.col()], it.value()));
+                }
+            }
+        }
+
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("set D from triplets", set_from_triplets_time, *logger);
+            D.setFromTriplets(triplets.begin(), triplets.end());
+            // logger->trace("D symmetric: {}", D.isApprox(D.transpose()));
+        }
+    }
+    
+    void ExperimentalSolver::build_index_mappings()
+    {
+        index_mappings.clear();
+        index_mappings.resize(bad_subdomain_assignments[myid].size());
+
+        int i_counter = 0;
+        for (int i : bad_subdomain_assignments[myid])
+        {
+            int j_counter = 0;
+            for (auto j : bad_indices_[i])
+            {
+                index_mappings[i_counter][j] = j_counter;
+                ++j_counter;
+            }
+            ++i_counter;
+        }
+    }
+
+    void ExperimentalSolver::decompose_subdomains_to_disjoint_subsets()
+    {
+        POLYSOLVE_SCOPED_STOPWATCH("subdomain decomposition time", decomp_time, *logger);
+        std::vector<int> all_bad_dofs;
+        std::vector<int> global_to_local(sparse_A.rows(), -1);
+        for (auto &subdomain : bad_indices_)
+        {
+            for (auto index : subdomain)
+            {
+                global_to_local[index] = all_bad_dofs.size();
+                all_bad_dofs.push_back(index);
+            }
+        }
+
+        disjointSet decomposed_subdomains(all_bad_dofs.size());
+
+        for (int k : all_bad_dofs)
+        {
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+            {
+                if (global_to_local[it.col()] != -1)
+                {
+                    decomposed_subdomains.union_set(global_to_local[it.row()], global_to_local[it.col()]);
+                }
+            }
+        }
+
+        std::unordered_map<int, std::vector<int>> chosen_sets;
+        for (auto index : all_bad_dofs)
+        {
+            chosen_sets[decomposed_subdomains.find_set(global_to_local[index])].push_back(index);
+        }
+
+        bad_indices_.clear();
+        //bad_indices_.reserve(chosen_sets.size());
+
+        for (auto &kv : chosen_sets)
+        {
+            if (kv.second.size() < min_subdomain_size)
+            {
+                continue;
+            }
+            if (kv.second.size() > max_subdomain_size)
+            {
+                partition_subdomain(kv.second);
+                continue;
+            }
+            bad_indices_.emplace_back(kv.second.begin(), kv.second.end());
+        }
+    }
+
+    void ExperimentalSolver::partition_subdomain(std::vector<int>& subdomain)
+    {
+        std::vector<idx_t> global_to_subdomain(sparse_A.rows(), -1);
+        for (int i = 0; i < subdomain.size(); ++i)
+        {
+            global_to_subdomain[subdomain[i]] = i;
+        }
+
+        idx_t nvtxs = subdomain.size();
+        idx_t ncon = 1;
+
+        std::vector<idx_t> xadj;
+        std::vector<idx_t> adjncy;
+        std::vector<idx_t> adjwgt;
+
+        xadj.push_back(0);
+
+        for (int i = 0; i < subdomain.size(); ++i)
+        {
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, subdomain[i]); it; ++it)
+            {
+                if (it.row() >= it.col())
+                {
+                    continue;
+                }
+
+                if (global_to_subdomain[it.col()] != -1)
+                {
+                    adjncy.push_back(global_to_subdomain[it.col()]);
+
+                    idx_t weight = abs(it.value()) * 1e4 + 1;
+                    adjwgt.push_back(weight);
+                }
+            }
+            xadj.push_back(adjncy.size());
+        }
+
+        idx_t nparts = (nvtxs + max_subdomain_size - 1) / max_subdomain_size;
+        real_t tolerance = (real_t) max_subdomain_size / ((real_t) nvtxs / (real_t) nparts);
+        real_t ubvec[1];
+        ubvec[0] = tolerance;
+
+        idx_t options[METIS_NOPTIONS];
+        METIS_SetDefaultOptions(options);
+
+        idx_t objval;
+        std::vector<idx_t> part(nvtxs);
+
+        int status = METIS_PartGraphKway(
+            &nvtxs,
+            &ncon,
+            xadj.data(),
+            adjncy.data(),
+            nullptr,
+            nullptr,
+            adjwgt.data(),
+            &nparts,
+            nullptr,
+            ubvec,
+            options,
+            &objval,
+            part.data()
+        );
+
+        int new_num_subdomains = *std::max_element(part.begin(), part.end()) + 1;
+        for (int i = 0; i < new_num_subdomains; ++i)
+        {
+            bad_indices_.emplace_back();
+        }
+
+        for (int i = 0; i < subdomain.size(); ++i)
+        {
+            bad_indices_[part[i] + bad_indices_.size() - new_num_subdomains].insert(subdomain[i]);
+        }
+    }
+
+    void ExperimentalSolver::share_bad_subdomains()
+    {
 #ifdef HYPRE_WITH_MPI
         int num_subdomains;
         if (myid == 0)
@@ -1968,8 +1828,10 @@ namespace polysolve::linear
                 bad_indices_arrays[i].push_back(index);
             }
         }
+    }
 
-        // load balance
+    void ExperimentalSolver::load_balance_subdomains()
+    {
         bad_subdomain_assignments.clear();
         bad_subdomain_assignments.resize(num_procs);
 
@@ -2002,69 +1864,8 @@ namespace polysolve::linear
             bad_subdomain_assignments[chosen_proc].push_back(i);
             assigned_sizes[chosen_proc] += size;
         }
-
-        factorize_submatrix();
-
-        if (myid == 0 && print_conditioning)
-        {
-            double print_cond_time;
-            POLYSOLVE_SCOPED_STOPWATCH("print conditioning time", print_cond_time, *logger);
-            check_matrix_conditioning("Hessian", sparse_A);
-            check_matrix_conditioning("Preconditioned Hessian", bad_indices_[0]);
-        }
     }
-
-    void ExperimentalSolver::check_matrix_conditioning(const std::string name, const std::set<int>& subdomain)
-    {
-        if (subdomain.size() == 0)
-        {
-            return;
-        }
-
-        Eigen::MatrixXd preconditioned_A = sparse_A;
-
-        for (int col = 0; col < preconditioned_A.cols(); ++col)
-        {
-            Eigen::VectorXd sub_rhs;
-            Eigen::VectorXd sub_result;
-            sub_rhs.resize(subdomain.size());
-            sub_result.resize(subdomain.size());
-
-            int i_counter = 0;
-            for (auto &i : subdomain)
-            {
-                sub_rhs(i_counter) = preconditioned_A(i, col);
-                ++i_counter;
-            }
-
-            sub_result = D_solvers[0]->solve(sub_rhs);
-            i_counter = 0;
-            for (auto &i : subdomain)
-            {
-                preconditioned_A(i, col) = sub_result(i_counter);
-                ++i_counter;
-            }
-        }
-
-        check_matrix_conditioning(name, preconditioned_A);
-    }
-
-    void ExperimentalSolver::check_matrix_conditioning(const std::string name, const Eigen::MatrixXd& mat)
-    {
-        Eigen::BDCSVD<Eigen::MatrixXd> svd(mat);
-        double cond = svd.singularValues()(0) 
-        / svd.singularValues()(svd.singularValues().size()-1);
-
-        Eigen::LDLT<Eigen::MatrixXd> chol_decomp(mat);
-        bool spd = !(chol_decomp.info() == Eigen::NumericalIssue);
-        bool symm = mat.isApprox(mat.transpose());
-        bool isPos = chol_decomp.isPositive();
-
-        logger->trace("Analyzing {}...", name);
-        logger->trace("SPD: {}, Symm: {}, isPos: {}", spd, symm, isPos);
-        logger->trace("Condition number: {}", cond);
-    }
-
+    
     ////////////////////////////////////////////////////////////////////////////////
 
     ExperimentalSolver::~ExperimentalSolver()
