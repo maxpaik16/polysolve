@@ -147,6 +147,7 @@ namespace polysolve::linear
 
         // problem-specific data
         Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_A;
+        Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_subsystem;
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> diag_inv; 
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> sqrt_diag_A_inv; 
 
@@ -161,6 +162,8 @@ namespace polysolve::linear
         std::vector<std::vector<int>> bad_indices_arrays;
         std::vector<std::vector<int>> bad_subdomain_assignments;
         std::vector<std::unordered_map<int, int>> index_mappings;
+        std::unordered_map<int, int> global_to_entire_subdomain;
+        std::vector<int> entire_subdomain_to_global;
 
 #ifdef POLYSOLVE_WITH_ICHOL
         // incomplete cholesky variables
@@ -204,8 +207,10 @@ namespace polysolve::linear
         double prepare_dss_time;
         double decomp_time;
         double print_cond_time;
+        double scatter_matrix_time;
 
         // factorization helpers
+        void scatter_matrix();
         void save_problem_to_file(const std::string& file_name);
         void partition_ranks();
         void copy_matrix_to_hypre();
@@ -216,6 +221,7 @@ namespace polysolve::linear
         void check_smallest_eigenvalue();
 
         // hybrid preconditioner helpers
+        void scatter_subsystem();
         void assemble_D(int bad_i, int i, Eigen::SparseMatrix<double>& D);
         void project_D(Eigen::SparseMatrix<double>& D);
         void build_index_mappings();

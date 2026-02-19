@@ -270,29 +270,17 @@ namespace polysolve::linear
     { 
         check_settings();
 
+        if (myid == 0)
         {
             POLYSOLVE_SCOPED_STOPWATCH("eigen matrix copy time", eigen_copy_time, *logger);
             sparse_A = A;
         }
 
-#ifdef HYPRE_WITH_MPI
-        if (myid == 0)
+        if (num_procs > 0)
         {
-            // send matrix to other MPI ranks
-            int rows, cols, nnzs;
-            rows = sparse_A.rows();
-            cols = sparse_A.cols();
-            nnzs = sparse_A.nonZeros();
-
-            MPI_Bcast(&rows, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(&cols, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(&nnzs, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-            MPI_Bcast(sparse_A.valuePtr(), nnzs, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(sparse_A.innerIndexPtr(), nnzs, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(sparse_A.outerIndexPtr(), rows + 1, MPI_INT, 0, MPI_COMM_WORLD);
+            POLYSOLVE_SCOPED_STOPWATCH("scatter matrix time", scatter_matrix_time, *logger);
+            scatter_matrix();
         }
-#endif
     }
 
     void ExperimentalSolver::factorize(const StiffnessMatrix &Ain)
@@ -301,23 +289,19 @@ namespace polysolve::linear
         logger->trace("Eigen num threads: {}", Eigen::nbThreads());
 
 #ifdef HYPRE_WITH_MPI
-        if (myid == 0)
-        {
-            int start_factorize =1 ;
-            MPI_Bcast(&start_factorize, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        } 
-        else 
-        {
-            {
-                POLYSOLVE_SCOPED_STOPWATCH("eigen matrix copy time", eigen_copy_time, *logger);
-                sparse_A = Ain;
-            }
-        }
-
         if (jacobi_precondition_system)
         {
             logger->trace("Using Jacobi preconditioned system. Diagonal info: min: {}, max: {}", sparse_A.diagonal().minCoeff(), sparse_A.diagonal().maxCoeff());
-            sqrt_diag_A_inv = sparse_A.diagonal().cwiseSqrt().asDiagonal().inverse();
+            Eigen::VectorXd sqrt_diag(sparse_A.rows());
+            sqrt_diag.setZero();
+
+            if (myid == 0)
+            {
+                sqrt_diag = sparse_A.diagonal().cwiseSqrt();
+            }
+            MPI_Allreduce(MPI_IN_PLACE, sqrt_diag.data(), sqrt_diag.size(), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+            sqrt_diag_A_inv = sqrt_diag.asDiagonal().inverse();
             sparse_A = sqrt_diag_A_inv * sparse_A * sqrt_diag_A_inv;
         }
 #endif
@@ -537,17 +521,30 @@ namespace polysolve::linear
     void ExperimentalSolver::solve(const Eigen::Ref<const VectorXd> rhs, Eigen::Ref<VectorXd> result)
     {
         assert(result.size() == rhs.size());
-        Eigen::VectorXd remapped_rhs = rhs;
-        Eigen::VectorXd remapped_result = result;
+        Eigen::VectorXd remapped_rhs; 
+        Eigen::VectorXd remapped_result; 
 
 #ifdef HYPRE_WITH_MPI
         if (myid == 0)
         {
             POLYSOLVE_SCOPED_STOPWATCH("copy problem to other ranks time", copy_to_ranks_time, *logger);
-            MPI_Bcast(remapped_rhs.data(), remapped_rhs.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(remapped_result.data(), remapped_result.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            int start_solve = 1;
-            MPI_Bcast(&start_solve, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+            remapped_rhs = rhs;
+            remapped_result = result;
+
+            int problem_size = remapped_rhs.size();
+            MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Bcast(remapped_rhs.data(), problem_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            MPI_Bcast(remapped_result.data(), problem_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        }
+        else 
+        {
+            int problem_size;
+            MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            remapped_rhs.resize(problem_size);
+            remapped_result.resize(problem_size); 
+            MPI_Bcast(remapped_rhs.data(), problem_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            MPI_Bcast(remapped_result.data(), problem_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         }
 #endif
 
@@ -906,7 +903,6 @@ namespace polysolve::linear
             local_result = diag_inv * eigen_b.segment(start_i, end_i - start_i + 1);
 #ifdef HYPRE_WITH_MPI
             all_gather_vec(local_result, eigen_x);
-            // MPI_Bcast(eigen_x.data(), eigen_x.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
 #endif
             return;
         }
@@ -960,7 +956,8 @@ namespace polysolve::linear
 
                 for (int i = 0; i < subdomain.size(); ++i)
                 {
-                    sub_rhs(index_mappings[index_counter][subdomain[i]]) = r(subdomain[i]) - sparse_A.row(subdomain[i]).dot(z);
+                    // TODO: replace with submatrix
+                    sub_rhs(index_mappings[index_counter][subdomain[i]]) = r(subdomain[i]) - sparse_subsystem.row(global_to_entire_subdomain[subdomain[i]]).dot(z);
                 }
 
                 {
@@ -1297,15 +1294,16 @@ namespace polysolve::linear
                 file << std::endl;;
                 file.close();
             }
-
-            if (decompose_subdomains)
-            {
-                decompose_subdomains_to_disjoint_subsets();
-            }
-            
 #ifdef HYPRE_WITH_MPI
         }
 #endif
+
+        scatter_subsystem();
+
+        if (myid == 0 && decompose_subdomains)
+        {
+            decompose_subdomains_to_disjoint_subsets();
+        }
 
         share_bad_subdomains();
         load_balance_subdomains();
@@ -1318,6 +1316,66 @@ namespace polysolve::linear
             check_matrix_conditioning("Hessian", sparse_A);
             check_matrix_conditioning("Preconditioned Hessian", bad_indices_[0]);
         }
+    }
+
+    void ExperimentalSolver::scatter_subsystem()
+    {
+        assert(bad_indices_.size() == 1);
+
+        logger->trace("starting sub scatter");
+        if (myid == 0)
+        {
+            global_to_entire_subdomain.clear();
+            entire_subdomain_to_global.resize(bad_indices_[0].size());
+            int li = 0;
+            for (auto gi : bad_indices_[0])
+            {
+                global_to_entire_subdomain[gi] = li;
+                entire_subdomain_to_global[li] = gi;
+                ++li;
+            }
+
+            std::vector<Eigen::Triplet<double>> triplets;
+            
+            for (int k : bad_indices_[0])
+            {
+                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+                {   
+                    triplets.emplace_back(Eigen::Triplet<double>(global_to_entire_subdomain[it.row()], it.col(), it.value()));
+                }
+            }
+
+            sparse_subsystem.resize(bad_indices_[0].size(), sparse_A.cols());
+            sparse_subsystem.setFromTriplets(triplets.begin(), triplets.end());
+        }
+
+        int subdomain_size = myid == 0 ? bad_indices_[0].size() : 0;
+        int nnz = myid == 0? sparse_subsystem.nonZeros() : 0;
+
+        MPI_Bcast(&subdomain_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(&nnz, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        if (myid != 0)
+        {
+            global_to_entire_subdomain.clear();
+            entire_subdomain_to_global.resize(subdomain_size);
+            sparse_subsystem.resize(subdomain_size, sparse_A.cols());
+            sparse_subsystem.reserve(nnz);
+        }
+
+        MPI_Bcast(entire_subdomain_to_global.data(), subdomain_size, MPI_INT, 0, MPI_COMM_WORLD);
+        if (myid != 0)
+        {
+            global_to_entire_subdomain.reserve(subdomain_size);
+            for (int li = 0; li < subdomain_size; ++li)
+            {
+                global_to_entire_subdomain[entire_subdomain_to_global[li]] = li;
+            }
+        }
+
+        MPI_Bcast(sparse_subsystem.valuePtr(), nnz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(sparse_subsystem.innerIndexPtr(), nnz, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(sparse_subsystem.outerIndexPtr(), subdomain_size + 1, MPI_INT, 0, MPI_COMM_WORLD);
     }
 
     void ExperimentalSolver::check_matrix_conditioning(const std::string name, const std::set<int>& subdomain)
@@ -1461,6 +1519,86 @@ namespace polysolve::linear
         logger->trace("World size: {}, myid: {}", num_procs, myid);
         logger->trace("start {}, end {}", start_i, end_i);
         local_result.resize(end_i - start_i + 1);
+    }
+
+    void ExperimentalSolver::scatter_matrix()
+    {
+    #ifdef HYPRE_WITH_MPI
+        if (myid == 0 && num_procs > 1)
+        {
+            int local_size = sparse_A.rows() / num_procs;
+
+            std::vector<int> row_vec;
+            std::vector<int> col_vec;
+            std::vector<double> val_vec;
+            std::vector<int> starts, ends;
+            std::vector<int> counts;
+
+            for (int i = 0; i < num_procs; ++i)
+            {
+                starts.push_back(i == 0 ? 0 : local_size * i + i);
+                ends.push_back(i == (num_procs - 1) ? sparse_A.rows() - 1 : starts.back() + local_size);
+            } 
+
+            std::vector<int> displs;
+            for (int k = 0; k < sparse_A.outerSize(); ++k)
+            {
+                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+                {
+                    if (displs.size() < starts.size() && it.row() == starts[displs.size()])
+                    {
+                        displs.push_back(row_vec.size());
+                    }
+
+                    row_vec.push_back(it.row());
+                    col_vec.push_back(it.col());
+                    val_vec.push_back(it.value());
+                }
+            }
+
+            std::vector<int> sizes(num_procs);
+            int proc_index = 0;
+            sizes[0] = 0;
+            sizes.back() = row_vec.size() - displs.back(); 
+            for (int i = num_procs - 2; i > 0; --i)
+            {
+                sizes[i] = displs[i + 1] - displs[i];
+            }            
+
+            int problem_size = sparse_A.rows();
+            MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            int root_size;
+            MPI_Scatter(sizes.data(), 1, MPI_INT, &root_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Scatterv(row_vec.data(), sizes.data(), displs.data(), MPI_INT, nullptr, root_size, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Scatterv(col_vec.data(), sizes.data(), displs.data(), MPI_INT, nullptr, root_size, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Scatterv(val_vec.data(), sizes.data(), displs.data(), MPI_DOUBLE, nullptr, root_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        }
+        else if (myid > 0)
+        {
+            int problem_size;
+            MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            int my_size;
+            MPI_Scatter(nullptr, 1, MPI_INT, &my_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            
+            std::vector<int> row_vec(my_size);
+            std::vector<int> col_vec(my_size);
+            std::vector<double> val_vec(my_size);
+            MPI_Scatterv(nullptr, nullptr, nullptr, MPI_INT, row_vec.data(), my_size, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Scatterv(nullptr, nullptr, nullptr, MPI_INT, col_vec.data(), my_size, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Scatterv(nullptr, nullptr, nullptr, MPI_DOUBLE, val_vec.data(), my_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+            std::vector<Eigen::Triplet<double>> triplets;
+            triplets.reserve(my_size);
+            for (int i = 0; i < my_size; ++i)
+            {
+                triplets.push_back(Eigen::Triplet<double>(row_vec[i], col_vec[i], val_vec[i]));
+            }
+
+            sparse_A.resize(problem_size, problem_size);
+            sparse_A.setFromTriplets(triplets.begin(), triplets.end());
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+#endif
     }
 
     void ExperimentalSolver::copy_matrix_to_hypre()
@@ -1611,12 +1749,13 @@ namespace polysolve::linear
         std::vector<Eigen::Triplet<double>> triplets;
         for (int k : bad_indices_[i])
         {
-            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+            // TODO: replace with submatrix
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_subsystem, global_to_entire_subdomain[k]); it; ++it)
             {
                 auto ind_it = index_mappings[bad_i].find(it.col());
                 if (ind_it != index_mappings[bad_i].end())
                 {
-                    triplets.push_back(Eigen::Triplet<double>(index_mappings[bad_i][it.row()], index_mappings[bad_i][it.col()], it.value()));
+                    triplets.push_back(Eigen::Triplet<double>(index_mappings[bad_i][k], index_mappings[bad_i][it.col()], it.value()));
                 }
             }
         }

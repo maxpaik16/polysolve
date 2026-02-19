@@ -229,35 +229,14 @@ int main(int argc, char **argv)
         }
     }
 
-    MPI_Bcast(&rows, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&cols, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&nnzs, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    int start_factorize = 0, start_solve = 0;
-    Eigen::VectorXd x(rows);
+    Eigen::VectorXd x;
 
     if (myid != 0)
     {
         while (true)
         {
-            MPI_Bcast(&rows, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(&cols, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(&nnzs, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-            A.resize(rows, cols);
-            A.reserve(nnzs);
-
-            MPI_Bcast(A.valuePtr(), nnzs, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(A.innerIndexPtr(), nnzs, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(A.outerIndexPtr(), rows + 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-            MPI_Bcast(&start_factorize, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            solver->analyze_pattern(A, 0);
             solver->factorize(A);
-            b.resize(rows);
-            x.resize(rows); 
-            MPI_Bcast(b.data(), rows, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(x.data(), rows, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(&start_solve, 1, MPI_INT, 0, MPI_COMM_WORLD);
             solver->solve(b, x);
         }
     }
@@ -269,6 +248,7 @@ int main(int argc, char **argv)
     for (int solve_i = 0; solve_i < num_trials; ++solve_i)
     {
         double solve_time;
+        x.resize(rows);
         x.setZero();
         if (b_file == "NONE")
         {
