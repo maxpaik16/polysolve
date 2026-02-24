@@ -1321,6 +1321,10 @@ namespace polysolve::linear
     void ExperimentalSolver::scatter_subsystem()
     {
         assert(bad_indices_.size() == 1);
+        if (bad_indices_.size() == 0 || bad_indices_[0].size() == 0)
+        {
+            return;
+        }
 
         logger->trace("starting sub scatter");
         if (myid == 0)
