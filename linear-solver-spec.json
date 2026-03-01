@@ -494,7 +494,8 @@
             "decompose_subdomains",
             "min_subdomain_size",
             "max_subdomain_size",
-            "jacobi_precondition_system"
+            "jacobi_precondition_system",
+            "find_threshold_from_secant"
         ],
         "doc": "Settings for the Experimental solver."
     },
@@ -725,5 +726,11 @@
         "default": false,
         "type": "bool",
         "doc": "If true, divide system by diagonal before solving."
+    },
+    {
+        "pointer": "/Experimental/find_threshold_from_secant",
+        "default": false,
+        "type": "bool",
+        "doc": "If true, find threshold from secant line."
     }                                    
 ]

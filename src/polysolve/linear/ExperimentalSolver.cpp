@@ -225,6 +225,10 @@ namespace polysolve::linear
             {
                 jacobi_precondition_system = params["Experimental"]["jacobi_precondition_system"];
             }
+            if (params["Experimental"].contains("find_threshold_from_secant"))
+            {
+                find_threshold_from_secant = params["Experimental"]["find_threshold_from_secant"];
+            }
         }
     }
 
@@ -622,7 +626,10 @@ namespace polysolve::linear
             HYPRE_BoomerAMGSetup(precond, parcsr_A, par_b, par_x);
         }
 
-        prepare_dss(remapped_rhs);
+        if (do_mixed_precond || use_problematic_subdomain_for_initial_guess || problematic_subdomain_precond_only)
+        {
+            prepare_dss(remapped_rhs);
+        }
 
         /* Now setup and solve! */
         {
@@ -737,7 +744,7 @@ namespace polysolve::linear
         for (int k = 0; k < max_iter_; ++k)
         {
 
-            if (do_mixed_precond && adapt_bad_dof_threshold && bad_dof_threshold < max_bad_dof_threshold && k >= adaptive_max_iters)
+            if ((problematic_subdomain_precond_only || do_mixed_precond) && adapt_bad_dof_threshold && bad_dof_threshold < max_bad_dof_threshold && k >= adaptive_max_iters)
             {
                 bad_dof_threshold *= bad_dof_threshold_inc_factor;
                 bad_dof_threshold = std::min(bad_dof_threshold, max_bad_dof_threshold);
@@ -1168,7 +1175,31 @@ namespace polysolve::linear
         Eigen::VectorXd sorted_sq_mags = sq_mags;
         std::sort(sorted_sq_mags.data(), sorted_sq_mags.data() + sorted_sq_mags.size());
 
-        const int cutoff_index = sorted_sq_mags.size() * (1 - bad_dof_threshold);
+        int cutoff_index;
+        if (find_threshold_from_secant)
+        {
+            Eigen::VectorXd log_sorted = sorted_sq_mags.array().log();
+            double min_mag = log_sorted.minCoeff();
+            double max_mag = log_sorted.maxCoeff();
+            int n = log_sorted.size();
+            double max_deviation = 0;
+            int max_deviation_index = 0;
+            for (int i = 0; i < n; ++i)
+            {
+                double y = log_sorted(i);
+                double deviation = abs((max_mag - min_mag) / (log_sorted.size()- 1) * i + min_mag - log_sorted(i));
+                if (deviation > max_deviation)
+                {
+                    max_deviation = deviation;
+                    max_deviation_index = i;
+                }
+            }
+            cutoff_index = max_deviation_index;
+        }
+        else
+        {
+            cutoff_index = sorted_sq_mags.size() * (1 - bad_dof_threshold);
+        }
         const double cutoff = sorted_sq_mags(cutoff_index);
         logger->trace("Problematic threshold: {}", cutoff);
 
@@ -1202,50 +1233,48 @@ namespace polysolve::linear
 
     void ExperimentalSolver::factorize_submatrix()
     {
-        if (do_mixed_precond || use_problematic_subdomain_for_initial_guess || problematic_subdomain_precond_only)
-        {
-            POLYSOLVE_SCOPED_STOPWATCH("assemble D", dss_assembly_time, *logger);
-            D_solvers.clear();
+        POLYSOLVE_SCOPED_STOPWATCH("assemble D", dss_assembly_time, *logger);
+        D_solvers.clear();
 
-            for (int i : bad_subdomain_assignments[myid])
-            {   
-                if (bad_indices_[i].size() > 1000)
-                {
-                    D_solvers.push_back(std::make_unique<EigenWrapper<Eigen::PardisoLDLT<Eigen::SparseMatrix<double>>>>());
-                }
-                else 
-                {
-                    D_solvers.push_back(std::make_unique<EigenWrapper<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>>>());
-                }
-            }
-
-            build_index_mappings();
-
-            int i_counter = 0;
-            for (int i : bad_subdomain_assignments[myid])
+        for (int i : bad_subdomain_assignments[myid])
+        {   
+            if (bad_indices_[i].size() > 1000)
             {
-                Eigen::SparseMatrix<double> D;
-                assemble_D(i_counter, i, D);
-
-                if (print_subdomain_conditioning)
-                {
-                    Eigen::EigenSolver<Eigen::MatrixXd> es(D);
-					auto abs_evs = es.eigenvalues().cwiseAbs();
-                    logger->trace("Condition number of subdomain: {}", abs_evs.maxCoeff() / abs_evs.minCoeff());
-                }
-
-                project_D(D);
-
-                {
-                    POLYSOLVE_SCOPED_STOPWATCH("factorize D", dss_factorization_time, *logger);
-                    D_solvers[i_counter]->compute(D);
-                }
-
-                ++i_counter;
+                D_solvers.push_back(std::make_unique<EigenWrapper<Eigen::PardisoLDLT<Eigen::SparseMatrix<double>>>>());
             }
-            
-            MPI_Barrier(MPI_COMM_WORLD);
+            else 
+            {
+                D_solvers.push_back(std::make_unique<EigenWrapper<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>>>());
+            }
         }
+
+        build_index_mappings();
+
+        int i_counter = 0;
+        for (int i : bad_subdomain_assignments[myid])
+        {
+            Eigen::SparseMatrix<double> D;
+            assemble_D(i_counter, i, D);
+
+            if (print_subdomain_conditioning)
+            {
+                Eigen::EigenSolver<Eigen::MatrixXd> es(D);
+                auto abs_evs = es.eigenvalues().cwiseAbs();
+                logger->trace("Condition number of subdomain: {}", abs_evs.maxCoeff() / abs_evs.minCoeff());
+            }
+
+            project_D(D);
+
+            {
+                POLYSOLVE_SCOPED_STOPWATCH("factorize D", dss_factorization_time, *logger);
+                D_solvers[i_counter]->compute(D);
+            }
+
+            ++i_counter;
+        }
+        
+        MPI_Barrier(MPI_COMM_WORLD);
+        
     }
 
     void ExperimentalSolver::matmul(Eigen::VectorXd &x, Eigen::SparseMatrix<double, Eigen::RowMajor> &A, Eigen::VectorXd &result)
@@ -1323,7 +1352,8 @@ namespace polysolve::linear
         assert(bad_indices_.size() == 1);
         if (bad_indices_.size() == 0 || bad_indices_[0].size() == 0)
         {
-            return;
+            bad_indices_.clear();
+            bad_indices_.resize(1);
         }
 
         logger->trace("starting sub scatter");

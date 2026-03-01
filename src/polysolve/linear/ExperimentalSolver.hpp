@@ -105,6 +105,7 @@ namespace polysolve::linear
         int min_subdomain_size = 1;
         int max_subdomain_size = 1e9;
         int project_d_option = 0;
+        bool find_threshold_from_secant = false;
 
         // General solver settings
         int dimension_ = 1; // 1 = scalar (Laplace), 2 or 3 = vector (Elasticity)
