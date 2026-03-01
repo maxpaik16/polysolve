@@ -251,14 +251,17 @@ namespace polysolve::linear
         {
             log_and_throw_error(*logger, "Matrix conditioning check requires non-decomposed subdomain!");
         }
-
+        if (problematic_subdomain_precond_only)
+        {
+            log_and_throw_error(*logger, "Problematic subdomain preconditioner only option has not been thoroughly tested!");
+        }
         if (!dss_in_middle)
         {
-            logger->warn("Only DSS in middle has been thoroughly tested!");
+            log_and_throw_error(*logger, "Only DSS in middle has been thoroughly tested!");
         }
         if (project_d_option != 0)
         {
-            logger->warn("Using relatively untested subdomain projection option ({})!", project_d_option);
+            log_and_throw_error(*logger, "Selected relatively untested subdomain projection option ({})!", project_d_option);
         }
     }
 
@@ -331,7 +334,7 @@ namespace polysolve::linear
 
         if (jacobi_precond)
         {
-            diag_inv = sparse_A.diagonal().segment(start_i, end_i - start_i + 1).asDiagonal().inverse();
+            diag_inv = sparse_A.diagonal().segment(starts[myid], ends[myid] - starts[myid] + 1).asDiagonal().inverse();
         }
 
         copy_matrix_to_hypre();
@@ -529,28 +532,29 @@ namespace polysolve::linear
         Eigen::VectorXd remapped_result; 
 
 #ifdef HYPRE_WITH_MPI
-        if (myid == 0)
+    
         {
             POLYSOLVE_SCOPED_STOPWATCH("copy problem to other ranks time", copy_to_ranks_time, *logger);
-
-            remapped_rhs = rhs;
-            remapped_result = result;
-
-            int problem_size = remapped_rhs.size();
-            MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(remapped_rhs.data(), problem_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-            MPI_Bcast(remapped_result.data(), problem_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        }
-        else 
-        {
             int problem_size;
+            if (myid == 0)
+            {
+                remapped_rhs = rhs;
+                remapped_result = result;
+                problem_size = remapped_rhs.size();
+            }
             MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            remapped_rhs.resize(problem_size);
-            remapped_result.resize(problem_size); 
+            if (myid != 0)
+            {
+                remapped_rhs.resize(problem_size);
+                remapped_result.resize(problem_size); 
+            }
             MPI_Bcast(remapped_rhs.data(), problem_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
             MPI_Bcast(remapped_result.data(), problem_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         }
 #endif
+        z1.resize(remapped_rhs.size());
+        z2.resize(remapped_rhs.size());
+        z3.resize(remapped_rhs.size());
 
         if (jacobi_precondition_system)
         {
@@ -582,8 +586,8 @@ namespace polysolve::linear
 
         {
             POLYSOLVE_SCOPED_STOPWATCH("copy x and b", copy_b_and_x_time, *logger);
-            eigen_to_hypre_par_vec(par_b, ij_b, remapped_rhs, start_i, end_i);
-            eigen_to_hypre_par_vec(par_x, ij_x, remapped_result, start_i, end_i);
+            eigen_to_hypre_par_vec(par_b, ij_b, remapped_rhs, starts[myid], ends[myid]);
+            eigen_to_hypre_par_vec(par_x, ij_x, remapped_result, starts[myid], ends[myid]);
         }
 
         /* AMG preconditioner */
@@ -650,12 +654,16 @@ namespace polysolve::linear
 
             Eigen::VectorXd A_times_result;
             matmul(remapped_result, sparse_A, A_times_result);
+            sync_vector(A_times_result);
+            sync_vector(remapped_rhs);
             final_res_norm = (remapped_rhs - A_times_result).norm();
+            
         }
 
         logger->debug("Experimental solver Iterations: {}", num_iterations);
         logger->debug("Experimental solver Final Relative Residual Norm: {}", final_res_norm);
 
+        sync_vector(remapped_result);
         result = remapped_result;
         recover_solution(result);
 
@@ -663,7 +671,6 @@ namespace polysolve::linear
         {
             POLYSOLVE_SCOPED_STOPWATCH("destroy time", destroy_time, *logger);
             HYPRE_BoomerAMGDestroy(precond);
-
             HYPRE_IJVectorDestroy(ij_x);
             HYPRE_IJVectorDestroy(ij_b);
         }
@@ -691,10 +698,24 @@ namespace polysolve::linear
         }
 
         Eigen::VectorXd r, p, z;
+        r.resize(rhs.size());
+        p.resize(rhs.size());
+        z.resize(rhs.size());
+        r.setZero();
         {
             POLYSOLVE_SCOPED_STOPWATCH("pre loop time: ", pre_loop_time, *logger);
+
+            if (num_procs > 1)
+            {
+                MPI_Win_create(z1.data(), z1.size() * sizeof(double), sizeof(double), 
+                            MPI_INFO_NULL, MPI_COMM_WORLD, &z1_win);
+                MPI_Win_create(z2.data(), z2.size() * sizeof(double), sizeof(double), 
+                            MPI_INFO_NULL, MPI_COMM_WORLD, &z2_win);
+                MPI_Win_create(r.data(), r.size() * sizeof(double), sizeof(double), 
+                            MPI_INFO_NULL, MPI_COMM_WORLD, &r_win);
+            }
         
-            bi_prod = rhs.dot(rhs);
+            bi_prod = dot(rhs, rhs);
             logger->trace("Experimental solver bi prod: {}", bi_prod);
 
             if (bi_prod > 0.0)
@@ -708,6 +729,12 @@ namespace polysolve::linear
                 final_res_norm = 0;
                 logger->debug("Experimental solver Iterations: {}", num_iterations);
                 logger->debug("Experimental solver Final Relative Residual Norm: {}", final_res_norm);
+                if (num_procs > 1)
+                {
+                    MPI_Win_free(&z1_win);
+                    MPI_Win_free(&z2_win);
+                    MPI_Win_free(&r_win);
+                }
 #ifdef HYPRE_WITH_MPI
                 MPI_Barrier(MPI_COMM_WORLD);
 #endif
@@ -716,7 +743,7 @@ namespace polysolve::linear
 
             Eigen::VectorXd A_times_result;
             matmul(result, sparse_A, A_times_result);
-            r = rhs - A_times_result;
+            r += rhs - A_times_result;
 
             p.resize(r.size());
             z.resize(r.size());
@@ -737,7 +764,7 @@ namespace polysolve::linear
             
             p = z;
 
-            gamma = r.dot(z);
+            gamma = dot(r, z);
             old_gamma = gamma;
         }
 
@@ -749,8 +776,16 @@ namespace polysolve::linear
                 bad_dof_threshold *= bad_dof_threshold_inc_factor;
                 bad_dof_threshold = std::min(bad_dof_threshold, max_bad_dof_threshold);
                 logger->trace("Restarting with new bad dof threshold: {}", bad_dof_threshold);
+                sync_vector(rhs);
+                sync_vector(result);
                 prepare_dss(rhs);
                 pcg_solve(rhs, result, par_b, par_x, precond);
+                if (num_procs > 1)
+                {
+                    MPI_Win_free(&z1_win);
+                    MPI_Win_free(&z2_win);
+                    MPI_Win_free(&r_win);
+                }
                 return;
             }
             
@@ -759,7 +794,7 @@ namespace polysolve::linear
 
             Eigen::VectorXd A_times_p;
             matmul(p, sparse_A, A_times_p);
-            double sdotp = p.dot(A_times_p);
+            double sdotp = dot(p, A_times_p);
 
             if (sdotp == 0.0)
             {
@@ -784,7 +819,7 @@ namespace polysolve::linear
             result += alpha * p;
             r -= alpha * A_times_p;
             //r = rhs - (sparse_A * result);
-            double drob2 = alpha * alpha * p.dot(p);
+            double drob2 = alpha * alpha * dot(p, p);
             if (!use_absolute_tol) 
             {
                 drob2 /= bi_prod;
@@ -796,7 +831,7 @@ namespace polysolve::linear
                 //break;
             }
 
-            double i_prod = r.dot(r);
+            double i_prod = dot(r, r);
             logger->trace("Experimental solver i prod: {}", i_prod);
             if (!use_absolute_tol) 
             {
@@ -822,13 +857,19 @@ namespace polysolve::linear
                 custom_mixed_precond_iter(precond, r, z);
             }
 
-            gamma = r.dot(z);
+            gamma = dot(r, z);
             double beta = gamma / old_gamma;
             old_gamma = gamma;
 
             p = z + beta*p;
         }
 #ifdef HYPRE_WITH_MPI
+        if (num_procs > 1)
+        {
+            MPI_Win_free(&z1_win);
+            MPI_Win_free(&z2_win);
+            MPI_Win_free(&r_win);
+        }
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
     }
@@ -845,9 +886,6 @@ namespace polysolve::linear
 
     void ExperimentalSolver::custom_mixed_precond_iter(const HYPRE_Solver &precond, Eigen::VectorXd &r, Eigen::VectorXd &z)
     {        
-        Eigen::VectorXd z1(r.size());
-        Eigen::VectorXd z2(r.size());
-        Eigen::VectorXd z3(r.size());
         z1.setZero();
         z2.setZero();
         z3.setZero();
@@ -907,9 +945,9 @@ namespace polysolve::linear
         if (jacobi_precond)
         {
             POLYSOLVE_SCOPED_STOPWATCH("jacobi time: ", jacobi_time, *logger);
-            local_result = diag_inv * eigen_b.segment(start_i, end_i - start_i + 1);
+            eigen_x.segment(starts[myid], ends[myid] - starts[myid] + 1) = diag_inv * eigen_b.segment(starts[myid], ends[myid] - starts[myid] + 1);
 #ifdef HYPRE_WITH_MPI
-            all_gather_vec(local_result, eigen_x);
+            // all_gather_vec(local_result, eigen_x);
 #endif
             return;
         }
@@ -920,33 +958,52 @@ namespace polysolve::linear
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
 
-        {
-            POLYSOLVE_SCOPED_STOPWATCH("copy to hypre time: ", copy_to_time, *logger);
-            HYPRE_IJVectorSetData(ij_x, eigen_x.data() + start_i);
-            HYPRE_IJVectorSetData(ij_b, eigen_b.data() + start_i);
-            HYPRE_IJVectorAssemble(ij_x);
-            HYPRE_IJVectorGetObject(ij_x, (void **)&par_x);
-            HYPRE_IJVectorAssemble(ij_b);
-            HYPRE_IJVectorGetObject(ij_b, (void **)&par_b);
-        }
+        HYPRE_IJVectorSetData(ij_x, eigen_x.data() + starts[myid]);
+        HYPRE_IJVectorSetData(ij_b, eigen_b.data() + starts[myid]);
+        HYPRE_IJVectorAssemble(ij_x);
+        HYPRE_IJVectorGetObject(ij_x, (void **)&par_x);
+        HYPRE_IJVectorAssemble(ij_b);
+        HYPRE_IJVectorGetObject(ij_b, (void **)&par_b);
+        
 
         {
             POLYSOLVE_SCOPED_STOPWATCH("boomeramg solve time: ", solve_time, *logger);
             HYPRE_BoomerAMGSolve(precond, parcsr_A, par_b, par_x);
         }
-
-        {
-            POLYSOLVE_SCOPED_STOPWATCH("copy from hypre time: ", copy_from_time, *logger);
-            local_result = eigen_x.segment(start_i, end_i - start_i + 1);
-            all_gather_vec(local_result, eigen_x);
-        }
         
     }
 
-    void ExperimentalSolver::dss_precond_iter(const Eigen::VectorXd &z, const Eigen::VectorXd &r, Eigen::VectorXd &next_z)
+    void ExperimentalSolver::dss_precond_iter(Eigen::VectorXd &z, Eigen::VectorXd &r, Eigen::VectorXd &next_z)
     {
         {
             POLYSOLVE_SCOPED_STOPWATCH("dss step time: ", dss_step_time, *logger);
+
+            if (num_procs > 1)
+            {
+                MPI_Win_fence(0, r_win);
+                MPI_Win_fence(0, z1_win);
+
+                for (int index : bad_subdomain_assignments[myid])
+                {
+                    auto &subdomain = bad_indices_arrays[index];
+                    for (auto i : subdomain)
+                    {
+                        int target_rank = 0;
+                        while (ends[target_rank] < i)
+                        {
+                            ++target_rank;
+                        }
+
+                        MPI_Get(r.data() + i, 1, MPI_DOUBLE,
+                            target_rank, i, 1, MPI_DOUBLE, r_win);
+                        MPI_Get(z.data() + i, 1, MPI_DOUBLE,
+                            target_rank, i, 1, MPI_DOUBLE, z1_win);
+                    }
+                }
+
+                MPI_Win_fence(0, r_win);
+                MPI_Win_fence(0, z1_win);
+            }
 
             next_z.setZero();
             Eigen::VectorXd sub_rhs, sub_result;
@@ -963,7 +1020,6 @@ namespace polysolve::linear
 
                 for (int i = 0; i < subdomain.size(); ++i)
                 {
-                    // TODO: replace with submatrix
                     sub_rhs(index_mappings[index_counter][subdomain[i]]) = r(subdomain[i]) - sparse_subsystem.row(global_to_entire_subdomain[subdomain[i]]).dot(z);
                 }
 
@@ -978,8 +1034,28 @@ namespace polysolve::linear
                 ++index_counter;
             }
 
-            MPI_Allreduce(MPI_IN_PLACE, next_z.data(), next_z.size(), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            next_z += z;
+            if (num_procs > 1)
+            {
+                MPI_Win_fence(0, z2_win);
+                
+                for (int index : bad_subdomain_assignments[myid])
+                {
+                    auto &subdomain = bad_indices_arrays[index];
+                    for (auto i : subdomain)
+                    {
+                        int target_rank = 0;
+                        while (ends[target_rank] < i)
+                        {
+                            ++target_rank;
+                        }
+
+                        MPI_Put(next_z.data() + i, 1, MPI_DOUBLE,
+                            target_rank, i, 1, MPI_DOUBLE, z2_win);
+                    }
+                }
+                MPI_Win_fence(0, z2_win);            
+            }
+            next_z.segment(starts[myid], ends[myid] - starts[myid] + 1) += z.segment(starts[myid], ends[myid] - starts[myid] + 1);
         }
     }
 
@@ -1087,10 +1163,10 @@ namespace polysolve::linear
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from amg", select_dofs_from_amg_time, *logger);
             HYPRE_ParVector test_par_b, test_par_x;
             HYPRE_IJVector test_x, test_b;
-            HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &test_b);
+            HYPRE_IJVectorCreate(MPI_COMM_WORLD, starts[myid], ends[myid], &test_b);
             HYPRE_IJVectorSetObjectType(test_b, HYPRE_PARCSR);
             HYPRE_IJVectorInitialize(test_b);
-            HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &test_x);
+            HYPRE_IJVectorCreate(MPI_COMM_WORLD, starts[myid], ends[myid], &test_x);
             HYPRE_IJVectorSetObjectType(test_x, HYPRE_PARCSR);
             HYPRE_IJVectorInitialize(test_x);
 
@@ -1099,8 +1175,8 @@ namespace polysolve::linear
             Eigen::VectorXd test_rhs(rhs.size());
             test_rhs.setZero();
 
-            eigen_to_hypre_par_vec(test_par_b, test_b, test_rhs, start_i, end_i);
-            eigen_to_hypre_par_vec(test_par_x, test_x, test_result, start_i, end_i);
+            eigen_to_hypre_par_vec(test_par_b, test_b, test_rhs, starts[myid], ends[myid]);
+            eigen_to_hypre_par_vec(test_par_x, test_x, test_result, starts[myid], ends[myid]);
 
             HYPRE_Solver test_precond;
             HYPRE_BoomerAMGCreate(&test_precond);
@@ -1126,7 +1202,7 @@ namespace polysolve::linear
             HYPRE_BoomerAMGSetup(test_precond, parcsr_A, test_par_b, test_par_x);
             HYPRE_BoomerAMGSolve(test_precond, parcsr_A, test_par_b, test_par_x);
 
-            hypre_vec_to_eigen(test_x, test_result, start_i, end_i, num_procs);
+            hypre_vec_to_eigen(test_x, test_result, starts[myid], ends[myid], num_procs);
 
             assert(rhs.size() % dimension_ == 0);
             for (int i = 0; i < rhs.size(); ++i)
@@ -1286,18 +1362,42 @@ namespace polysolve::linear
             result = A * x;
         }
         else
-        {
+        {            
             result.resize(x.size());
-            for (int i = 0; i < end_i - start_i + 1; ++i)
-            {
-                local_result(i) = A.row(start_i + i).dot(x);
-            }
-
-            all_gather_vec(local_result, result);
+            result.setZero();
+            HYPRE_ParVector par_x;
+            HYPRE_ParVector par_result;
+            HYPRE_IJVectorSetData(ij_x, x.data() + starts[myid]);
+            HYPRE_IJVectorAssemble(ij_x);
+            HYPRE_IJVectorGetObject(ij_x, (void **)&par_x);
+            HYPRE_IJVectorSetData(ij_b, result.data() + starts[myid]);
+            HYPRE_IJVectorAssemble(ij_b);
+            HYPRE_IJVectorGetObject(ij_b, (void **)&par_result);
+            HYPRE_ParCSRMatrixMatvec(1.0, parcsr_A, par_x, 0.0, par_result);
         }
 #else
         result = A*x;
 #endif
+    }
+
+    double ExperimentalSolver::dot(Eigen::VectorXd &a, Eigen::VectorXd &b)
+    {
+#ifdef HYPRE_WITH_MPI
+        HYPRE_ParVector par_a;
+        HYPRE_ParVector par_b;
+        HYPRE_IJVectorSetData(ij_x, a.data() + starts[myid]);
+        HYPRE_IJVectorAssemble(ij_x);
+        HYPRE_IJVectorGetObject(ij_x, (void **)&par_a);
+        HYPRE_IJVectorSetData(ij_b, b.data() + starts[myid]);
+        HYPRE_IJVectorAssemble(ij_b);
+        HYPRE_IJVectorGetObject(ij_b, (void **)&par_b);
+        double result;
+        HYPRE_ParVectorInnerProd(par_a, par_b, &result);
+        return result;
+#else
+        result = a.dot(b);
+#endif
+        return result;
     }
 
     void ExperimentalSolver::prepare_dss(Eigen::VectorXd &rhs)
@@ -1490,7 +1590,7 @@ namespace polysolve::linear
         std::vector<int> recv_counts(num_procs);
         std::vector<int> displs(num_procs);
 
-        int local_size = end_i - start_i + 1;
+        int local_size = ends[myid] - starts[myid] + 1;
         MPI_Allgather(&local_size, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
 
         displs[0] = 0;
@@ -1502,6 +1602,12 @@ namespace polysolve::linear
                     global_result.data(), recv_counts.data(), displs.data(), 
                     MPI_DOUBLE, MPI_COMM_WORLD);
 
+    }
+
+    void ExperimentalSolver::sync_vector(Eigen::VectorXd &vec)
+    {
+        Eigen::VectorXd local_part = vec.segment(starts[myid], ends[myid] - starts[myid] + 1);
+        all_gather_vec(local_part, vec);
     }
 
     void ExperimentalSolver::check_matrix_conditioning(const std::string name, const Eigen::MatrixXd& mat)
@@ -1547,12 +1653,14 @@ namespace polysolve::linear
     void ExperimentalSolver::partition_ranks()
     {
         int local_size = sparse_A.rows() / num_procs;
-        start_i = myid == 0 ? 0 : local_size * myid + myid;
-        end_i = myid == (num_procs - 1) ? sparse_A.rows() - 1 : start_i + local_size;
-
+        for (int i = 0; i < num_procs; ++i)
+        {
+            starts.push_back(i == 0 ? 0 : local_size * i + i);
+            ends.push_back(i == (num_procs - 1) ? sparse_A.rows() - 1 : starts.back() + local_size);
+        }   
         logger->trace("World size: {}, myid: {}", num_procs, myid);
-        logger->trace("start {}, end {}", start_i, end_i);
-        local_result.resize(end_i - start_i + 1);
+        logger->trace("start {}, end {}", starts[myid], ends[myid]);
+        local_result.resize(ends[myid] - starts[myid] + 1);
     }
 
     void ExperimentalSolver::scatter_matrix()
@@ -1640,14 +1748,14 @@ namespace polysolve::linear
         POLYSOLVE_SCOPED_STOPWATCH("copy matrix time", matrix_copy_time, *logger);
 
 #ifdef HYPRE_WITH_MPI
-        HYPRE_IJMatrixCreate(MPI_COMM_WORLD, start_i, end_i, start_i, end_i, &A);
+        HYPRE_IJMatrixCreate(MPI_COMM_WORLD, starts[myid], ends[myid], starts[myid], ends[myid], &A);
 #else
         HYPRE_IJMatrixCreate(0, 0, sparse_A.rows() - 1, 0, sparse_A.cols() - 1, &A);
 #endif
         HYPRE_IJMatrixSetObjectType(A, HYPRE_PARCSR);
         HYPRE_IJMatrixInitialize(A);
 
-        for (HYPRE_Int k = start_i; k <= end_i; ++k)
+        for (HYPRE_Int k = starts[myid]; k <= ends[myid]; ++k)
         {
             HYPRE_Int row[1]; 
             int counter = 0;
@@ -1670,7 +1778,7 @@ namespace polysolve::linear
     void ExperimentalSolver::init_hypre_vectors()
     {
 #ifdef HYPRE_WITH_MPI
-        HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &ij_x);
+        HYPRE_IJVectorCreate(MPI_COMM_WORLD, starts[myid], ends[myid], &ij_x);
 #else
         HYPRE_IJVectorCreate(0, 0, rhs.size() - 1, &x);
 #endif
@@ -1679,7 +1787,7 @@ namespace polysolve::linear
         HYPRE_IJVectorInitializeShell(ij_x);
 
 #ifdef HYPRE_WITH_MPI
-        HYPRE_IJVectorCreate(MPI_COMM_WORLD, start_i, end_i, &ij_b);
+        HYPRE_IJVectorCreate(MPI_COMM_WORLD, starts[myid], ends[myid], &ij_b);
 #else
         HYPRE_IJVectorCreate(0, 0, rhs.size() - 1, &ij_b);
 #endif
@@ -1783,7 +1891,6 @@ namespace polysolve::linear
         std::vector<Eigen::Triplet<double>> triplets;
         for (int k : bad_indices_[i])
         {
-            // TODO: replace with submatrix
             for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_subsystem, global_to_entire_subdomain[k]); it; ++it)
             {
                 auto ind_it = index_mappings[bad_i].find(it.col());

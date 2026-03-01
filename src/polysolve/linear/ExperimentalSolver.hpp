@@ -141,7 +141,8 @@ namespace polysolve::linear
         // MPI rank distribution 
         int myid = 0;
         int num_procs = 1;
-        int start_i, end_i;
+        std::vector<int> starts;
+        std::vector<int> ends;
 
         // temporary buffer
         Eigen::VectorXd local_result;
@@ -165,6 +166,9 @@ namespace polysolve::linear
         std::vector<std::unordered_map<int, int>> index_mappings;
         std::unordered_map<int, int> global_to_entire_subdomain;
         std::vector<int> entire_subdomain_to_global;
+
+        Eigen::VectorXd z1, z2, z3;
+        MPI_Win z1_win, r_win, z2_win;
 
 #ifdef POLYSOLVE_WITH_ICHOL
         // incomplete cholesky variables
@@ -233,6 +237,7 @@ namespace polysolve::linear
 
         // matrix multiplication
         void matmul(Eigen::VectorXd &x, Eigen::SparseMatrix<double, Eigen::RowMajor> &A, Eigen::VectorXd &result);
+        double dot(Eigen::VectorXd &x, Eigen::VectorXd &y);
 
         // log system conditioning
         void check_matrix_conditioning(const std::string name, const std::set<int>& subdomain);
@@ -241,7 +246,7 @@ namespace polysolve::linear
         // preconditioning functions
         void custom_mixed_precond_iter(const HYPRE_Solver &precond, Eigen::VectorXd &r, Eigen::VectorXd &z);
         void amg_precond_iter(const HYPRE_Solver &precond, Eigen::VectorXd& b, Eigen::VectorXd &x);
-        void dss_precond_iter(const Eigen::VectorXd &z, const Eigen::VectorXd &r, Eigen::VectorXd &next_z);
+        void dss_precond_iter(Eigen::VectorXd &z, Eigen::VectorXd &r, Eigen::VectorXd &next_z);
 
         // hybrid preconditioner preparation functions
         void prepare_dss(Eigen::VectorXd &rhs);
@@ -253,8 +258,9 @@ namespace polysolve::linear
         void ApplyPlaneRotation(double &dx, double &dy, double &cs, double &sn);
         void Update(Eigen::VectorXd &x, int k, Eigen::MatrixXd &h, Eigen::VectorXd &s, Eigen::MatrixXd &v);
 
-        // MPI communication helper
+        // MPI communication helpers
         void all_gather_vec(const Eigen::VectorXd &local_part, Eigen::VectorXd &global_result);
+        void sync_vector(Eigen::VectorXd &vec);
 
         // Krylov solve methods
         void pcg_solve(Eigen::VectorXd &rhs, Eigen::VectorXd &result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond);
