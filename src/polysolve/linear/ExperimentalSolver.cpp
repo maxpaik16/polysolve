@@ -1652,6 +1652,8 @@ namespace polysolve::linear
 
     void ExperimentalSolver::partition_ranks()
     {
+        starts.clear();
+        ends.clear();
         int local_size = sparse_A.rows() / num_procs;
         for (int i = 0; i < num_procs; ++i)
         {
