@@ -168,7 +168,7 @@ namespace polysolve::linear
         std::vector<int> entire_subdomain_to_global;
 
         Eigen::VectorXd z1, z2, z3;
-        MPI_Win z1_win, r_win, z2_win;
+        MPI_Win z2_win;
 
 #ifdef POLYSOLVE_WITH_ICHOL
         // incomplete cholesky variables

@@ -707,12 +707,8 @@ namespace polysolve::linear
 
             if (num_procs > 1)
             {
-                MPI_Win_create(z1.data(), z1.size() * sizeof(double), sizeof(double), 
-                            MPI_INFO_NULL, MPI_COMM_WORLD, &z1_win);
                 MPI_Win_create(z2.data(), z2.size() * sizeof(double), sizeof(double), 
                             MPI_INFO_NULL, MPI_COMM_WORLD, &z2_win);
-                MPI_Win_create(r.data(), r.size() * sizeof(double), sizeof(double), 
-                            MPI_INFO_NULL, MPI_COMM_WORLD, &r_win);
             }
         
             bi_prod = dot(rhs, rhs);
@@ -731,9 +727,7 @@ namespace polysolve::linear
                 logger->debug("Experimental solver Final Relative Residual Norm: {}", final_res_norm);
                 if (num_procs > 1)
                 {
-                    MPI_Win_free(&z1_win);
                     MPI_Win_free(&z2_win);
-                    MPI_Win_free(&r_win);
                 }
 #ifdef HYPRE_WITH_MPI
                 MPI_Barrier(MPI_COMM_WORLD);
@@ -782,9 +776,7 @@ namespace polysolve::linear
                 pcg_solve(rhs, result, par_b, par_x, precond);
                 if (num_procs > 1)
                 {
-                    MPI_Win_free(&z1_win);
                     MPI_Win_free(&z2_win);
-                    MPI_Win_free(&r_win);
                 }
                 return;
             }
@@ -866,9 +858,7 @@ namespace polysolve::linear
 #ifdef HYPRE_WITH_MPI
         if (num_procs > 1)
         {
-            MPI_Win_free(&z1_win);
             MPI_Win_free(&z2_win);
-            MPI_Win_free(&r_win);
         }
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
@@ -980,29 +970,8 @@ namespace polysolve::linear
 
             if (num_procs > 1)
             {
-                MPI_Win_fence(0, r_win);
-                MPI_Win_fence(0, z1_win);
-
-                for (int index : bad_subdomain_assignments[myid])
-                {
-                    auto &subdomain = bad_indices_arrays[index];
-                    for (auto i : subdomain)
-                    {
-                        int target_rank = 0;
-                        while (ends[target_rank] < i)
-                        {
-                            ++target_rank;
-                        }
-
-                        MPI_Get(r.data() + i, 1, MPI_DOUBLE,
-                            target_rank, i, 1, MPI_DOUBLE, r_win);
-                        MPI_Get(z.data() + i, 1, MPI_DOUBLE,
-                            target_rank, i, 1, MPI_DOUBLE, z1_win);
-                    }
-                }
-
-                MPI_Win_fence(0, r_win);
-                MPI_Win_fence(0, z1_win);
+                sync_vector(z);
+                sync_vector(r);
             }
 
             next_z.setZero();
