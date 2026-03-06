@@ -149,9 +149,10 @@ namespace polysolve::linear
 
         // problem-specific data
         Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_A;
-        Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_subsystem;
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> diag_inv; 
         Eigen::DiagonalMatrix<double, Eigen::Dynamic> sqrt_diag_A_inv; 
+        Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic> P;
+        Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic> P_T;
 
         // Hypre variables
         HYPRE_IJMatrix A;
@@ -164,11 +165,8 @@ namespace polysolve::linear
         std::vector<std::vector<int>> bad_indices_arrays;
         std::vector<std::vector<int>> bad_subdomain_assignments;
         std::vector<std::unordered_map<int, int>> index_mappings;
-        std::unordered_map<int, int> global_to_entire_subdomain;
-        std::vector<int> entire_subdomain_to_global;
 
         Eigen::VectorXd z1, z2, z3;
-        MPI_Win z2_win;
 
 #ifdef POLYSOLVE_WITH_ICHOL
         // incomplete cholesky variables
@@ -226,7 +224,7 @@ namespace polysolve::linear
         void check_smallest_eigenvalue();
 
         // hybrid preconditioner helpers
-        void scatter_subsystem();
+        //void scatter_subsystem();
         void assemble_D(int bad_i, int i, Eigen::SparseMatrix<double>& D);
         void project_D(Eigen::SparseMatrix<double>& D);
         void build_index_mappings();
@@ -234,6 +232,7 @@ namespace polysolve::linear
         void partition_subdomain(std::vector<int>& subdomain);
         void share_bad_subdomains();
         void load_balance_subdomains();
+        void compute_permutation_matrix();
 
         // matrix multiplication
         void matmul(Eigen::VectorXd &x, Eigen::SparseMatrix<double, Eigen::RowMajor> &A, Eigen::VectorXd &result);
@@ -249,8 +248,8 @@ namespace polysolve::linear
         void dss_precond_iter(Eigen::VectorXd &z, Eigen::VectorXd &r, Eigen::VectorXd &next_z);
 
         // hybrid preconditioner preparation functions
-        void prepare_dss(Eigen::VectorXd &rhs);
-        void select_bad_indices(Eigen::VectorXd &rhs);
+        void prepare_dss();
+        void select_bad_indices();
         void factorize_submatrix();
 
         // GMRES helpers

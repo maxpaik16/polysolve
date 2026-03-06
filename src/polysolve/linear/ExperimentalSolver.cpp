@@ -263,6 +263,18 @@ namespace polysolve::linear
         {
             log_and_throw_error(*logger, "Selected relatively untested subdomain projection option ({})!", project_d_option);
         }
+        if (adapt_bad_dof_threshold)
+        {
+            log_and_throw_error(*logger, "Adaptive bad DOF thresholding has been deprecated!");
+        }
+        if (select_bad_dofs_from_rhs)
+        {
+            log_and_throw_error(*logger, "Selecting bad DOFs from the RHS has been deprecated!");
+        }
+        if (select_bad_dofs_from_amg)
+        {
+            log_and_throw_error(*logger, "Selecting bad DOFs from AMG has been deprecated!");
+        }
     }
 
     void ExperimentalSolver::get_info(json &params) const
@@ -276,24 +288,46 @@ namespace polysolve::linear
     void ExperimentalSolver::analyze_pattern(const StiffnessMatrix &A, const int precond_num) 
     { 
         check_settings();
-
-        if (myid == 0)
-        {
-            POLYSOLVE_SCOPED_STOPWATCH("eigen matrix copy time", eigen_copy_time, *logger);
-            sparse_A = A;
-        }
-
-        if (num_procs > 0)
-        {
-            POLYSOLVE_SCOPED_STOPWATCH("scatter matrix time", scatter_matrix_time, *logger);
-            scatter_matrix();
-        }
     }
 
     void ExperimentalSolver::factorize(const StiffnessMatrix &Ain)
     {
         logger->trace("Num Threads for ExperimentalSolver: {}", num_threads);
         logger->trace("Eigen num threads: {}", Eigen::nbThreads());
+        logger->trace("World size: {}, myid: {}", num_procs, myid);
+
+        if (myid == 0)
+        {
+            {
+                POLYSOLVE_SCOPED_STOPWATCH("eigen matrix copy time", eigen_copy_time, *logger);
+                sparse_A = Ain;
+            }
+
+            if (do_mixed_precond || use_problematic_subdomain_for_initial_guess || problematic_subdomain_precond_only)
+            {
+                prepare_dss();
+            }
+            else
+            {
+                P.resize(sparse_A.rows());
+                P.setIdentity();
+                P_T = P.transpose();
+                partition_ranks();
+                sparse_A = P * sparse_A * P_T;
+                scatter_matrix();
+            }
+        }
+        else
+        {   
+            if (do_mixed_precond || use_problematic_subdomain_for_initial_guess || problematic_subdomain_precond_only)
+            {
+                prepare_dss();
+            }
+            else
+            {
+                scatter_matrix();
+            }
+        }
 
 #ifdef HYPRE_WITH_MPI
         if (jacobi_precondition_system)
@@ -329,8 +363,6 @@ namespace polysolve::linear
             save_problem_to_file("A.mat");
         }
         has_matrix_ = true;
-
-        partition_ranks();
 
         if (jacobi_precond)
         {
@@ -538,8 +570,8 @@ namespace polysolve::linear
             int problem_size;
             if (myid == 0)
             {
-                remapped_rhs = rhs;
-                remapped_result = result;
+                remapped_rhs = P * rhs;
+                remapped_result = P * result;
                 problem_size = remapped_rhs.size();
             }
             MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -630,11 +662,6 @@ namespace polysolve::linear
             HYPRE_BoomerAMGSetup(precond, parcsr_A, par_b, par_x);
         }
 
-        if (do_mixed_precond || use_problematic_subdomain_for_initial_guess || problematic_subdomain_precond_only)
-        {
-            prepare_dss(remapped_rhs);
-        }
-
         /* Now setup and solve! */
         {
             POLYSOLVE_SCOPED_STOPWATCH("actual solve time", actual_solve_time, *logger);
@@ -704,12 +731,6 @@ namespace polysolve::linear
         r.setZero();
         {
             POLYSOLVE_SCOPED_STOPWATCH("pre loop time: ", pre_loop_time, *logger);
-
-            if (num_procs > 1)
-            {
-                MPI_Win_create(z2.data(), z2.size() * sizeof(double), sizeof(double), 
-                            MPI_INFO_NULL, MPI_COMM_WORLD, &z2_win);
-            }
         
             bi_prod = dot(rhs, rhs);
             logger->trace("Experimental solver bi prod: {}", bi_prod);
@@ -725,10 +746,6 @@ namespace polysolve::linear
                 final_res_norm = 0;
                 logger->debug("Experimental solver Iterations: {}", num_iterations);
                 logger->debug("Experimental solver Final Relative Residual Norm: {}", final_res_norm);
-                if (num_procs > 1)
-                {
-                    MPI_Win_free(&z2_win);
-                }
 #ifdef HYPRE_WITH_MPI
                 MPI_Barrier(MPI_COMM_WORLD);
 #endif
@@ -772,12 +789,8 @@ namespace polysolve::linear
                 logger->trace("Restarting with new bad dof threshold: {}", bad_dof_threshold);
                 sync_vector(rhs);
                 sync_vector(result);
-                prepare_dss(rhs);
+                prepare_dss();
                 pcg_solve(rhs, result, par_b, par_x, precond);
-                if (num_procs > 1)
-                {
-                    MPI_Win_free(&z2_win);
-                }
                 return;
             }
             
@@ -856,10 +869,6 @@ namespace polysolve::linear
             p = z + beta*p;
         }
 #ifdef HYPRE_WITH_MPI
-        if (num_procs > 1)
-        {
-            MPI_Win_free(&z2_win);
-        }
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
     }
@@ -875,7 +884,7 @@ namespace polysolve::linear
     }
 
     void ExperimentalSolver::custom_mixed_precond_iter(const HYPRE_Solver &precond, Eigen::VectorXd &r, Eigen::VectorXd &z)
-    {        
+    {
         z1.setZero();
         z2.setZero();
         z3.setZero();
@@ -968,63 +977,54 @@ namespace polysolve::linear
         {
             POLYSOLVE_SCOPED_STOPWATCH("dss step time: ", dss_step_time, *logger);
 
+            double sync_time;
             if (num_procs > 1)
             {
+                POLYSOLVE_SCOPED_STOPWATCH("dss sync time: ", sync_time, *logger);
                 sync_vector(z);
-                sync_vector(r);
             }
 
-            next_z.setZero();
-            Eigen::VectorXd sub_rhs, sub_result;
-        
-            int index_counter = 0;
-            for (int index : bad_subdomain_assignments[myid])
+            double work_time;
             {
-                auto &subdomain = bad_indices_arrays[index];
-
-                {
-                    sub_rhs.resize(subdomain.size());
-                    sub_result.resize(subdomain.size());
-                }
-
-                for (int i = 0; i < subdomain.size(); ++i)
-                {
-                    sub_rhs(index_mappings[index_counter][subdomain[i]]) = r(subdomain[i]) - sparse_subsystem.row(global_to_entire_subdomain[subdomain[i]]).dot(z);
-                }
-
-                {
-                    sub_result = D_solvers[index_counter]->solve(sub_rhs);
-                }
-
-                for (int i = 0; i < subdomain.size(); ++i)
-                {
-                    next_z(subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
-                }
-                ++index_counter;
-            }
-
-            if (num_procs > 1)
-            {
-                MPI_Win_fence(0, z2_win);
-                
+                POLYSOLVE_SCOPED_STOPWATCH("dss work time: ", work_time, *logger);
+                next_z.setZero();
+            
+                int index_counter = 0;
                 for (int index : bad_subdomain_assignments[myid])
                 {
                     auto &subdomain = bad_indices_arrays[index];
-                    for (auto i : subdomain)
-                    {
-                        int target_rank = 0;
-                        while (ends[target_rank] < i)
-                        {
-                            ++target_rank;
-                        }
+                    Eigen::VectorXd sub_rhs, sub_result;
 
-                        MPI_Put(next_z.data() + i, 1, MPI_DOUBLE,
-                            target_rank, i, 1, MPI_DOUBLE, z2_win);
+                    {
+                        sub_rhs.resize(subdomain.size());
+                        sub_result.resize(subdomain.size());
                     }
+
+                    for (int i = 0; i < subdomain.size(); ++i)
+                    {
+                        sub_rhs(index_mappings[index_counter][subdomain[i]]) = r(subdomain[i]) - sparse_A.row(subdomain[i]).dot(z);
+                        //logger->trace("A row sum: {}", sparse_A.row(subdomain[i]).cwiseAbs().sum());
+                        //logger->trace("Subdomain {}, dof {}, rhs value: {}, mystart/end: {}/{}", index, subdomain[i], sub_rhs(index_mappings[index_counter][subdomain[i]]), starts[myid], ends[myid]);
+                    }
+
+                    {
+                        sub_result = D_solvers[index_counter]->solve(sub_rhs);
+                    }
+
+                    for (int i = 0; i < subdomain.size(); ++i)
+                    {
+                        next_z(subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                    }
+                    ++index_counter;
                 }
-                MPI_Win_fence(0, z2_win);            
+                MPI_Barrier(MPI_COMM_WORLD);
             }
-            next_z.segment(starts[myid], ends[myid] - starts[myid] + 1) += z.segment(starts[myid], ends[myid] - starts[myid] + 1);
+
+            double sum_time;
+            {
+                POLYSOLVE_SCOPED_STOPWATCH("dss sum time: ", sum_time, *logger);
+                next_z.segment(starts[myid], ends[myid] - starts[myid] + 1) += z.segment(starts[myid], ends[myid] - starts[myid] + 1);
+            }
         }
     }
 
@@ -1089,10 +1089,10 @@ namespace polysolve::linear
     }
 #endif
 
-    void ExperimentalSolver::select_bad_indices(Eigen::VectorXd &rhs)
+    void ExperimentalSolver::select_bad_indices()
     {
         POLYSOLVE_SCOPED_STOPWATCH("bad dof selection time", bad_dof_selection_time, *logger);
-        Eigen::VectorXd sq_mags(rhs.size());
+        Eigen::VectorXd sq_mags(sparse_A.rows());
         double cutoff_threshold; 
 
         if (!(select_bad_dofs_from_amg || select_bad_dofs_from_rhs || select_bad_dofs_from_row_norms || select_bad_dofs_from_diag))
@@ -1111,20 +1111,7 @@ namespace polysolve::linear
         if (select_bad_dofs_from_rhs)
         {
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from rhs", select_dofs_from_rhs_time, *logger);
-            assert(rhs.size() % dimension_ == 0);
-            for (int i = 0; i < rhs.size() / dimension_; ++i)
-            {
-                double sq_mag = rhs(dimension_ * i) * rhs(dimension_ * i);
-                for (int j = 1; j < dimension_; ++j)
-                {
-                    sq_mag += rhs(dimension_ * i + j) * rhs(dimension_ * i + j);
-                } 
-                for (int j = 1; j < dimension_; ++j)
-                {
-                    sq_mags(dimension_ * i + j) = sq_mag;
-                } 
-            }
-
+            log_and_throw_error(*logger, "Selection from rhs not implemented!");
         }
 
         if (select_bad_dofs_from_amg)
@@ -1139,9 +1126,9 @@ namespace polysolve::linear
             HYPRE_IJVectorSetObjectType(test_x, HYPRE_PARCSR);
             HYPRE_IJVectorInitialize(test_x);
 
-            Eigen::VectorXd test_result = Eigen::VectorXd::Random(rhs.size());
+            Eigen::VectorXd test_result = Eigen::VectorXd::Random(sparse_A.rows());
             Eigen::VectorXd start_result = test_result;
-            Eigen::VectorXd test_rhs(rhs.size());
+            Eigen::VectorXd test_rhs(sparse_A.rows());
             test_rhs.setZero();
 
             eigen_to_hypre_par_vec(test_par_b, test_b, test_rhs, starts[myid], ends[myid]);
@@ -1173,8 +1160,8 @@ namespace polysolve::linear
 
             hypre_vec_to_eigen(test_x, test_result, starts[myid], ends[myid], num_procs);
 
-            assert(rhs.size() % dimension_ == 0);
-            for (int i = 0; i < rhs.size(); ++i)
+            //assert(rhs.size() % dimension_ == 0);
+            for (int i = 0; i < sparse_A.rows(); ++i)
             {
                 sq_mags(i) = abs(test_result(i) / start_result(i));
             }
@@ -1187,23 +1174,16 @@ namespace polysolve::linear
         if (select_bad_dofs_from_diag)
         {
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from hess diagonal", select_dofs_from_diag_time, *logger);
-            assert(rhs.size() % dimension_ == 0);
-            if (jacobi_precondition_system)
-            {
-                sq_mags = sqrt_diag_A_inv.diagonal().cwiseInverse();
-            }
-            else
-            {
-                sq_mags = sparse_A.diagonal().cwiseAbs();
-            }
-
+            //assert(rhs.size() % dimension_ == 0);
+            sq_mags = sparse_A.diagonal().cwiseAbs();
+        
         }
 
         if (select_bad_dofs_from_row_norms)
         {
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from hess row norms", select_dofs_from_row_norms_time, *logger);
-            assert(rhs.size() % dimension_ == 0);
-            for (int i = 0; i < rhs.size(); ++i)
+            //assert(rhs.size() % dimension_ == 0);
+            for (int i = 0; i < sparse_A.rows(); ++i)
             {
                 sq_mags(i) = sparse_A.row(i).norm();
             }
@@ -1217,8 +1197,16 @@ namespace polysolve::linear
             file.close();
         }
 
-        Eigen::VectorXd sorted_sq_mags = sq_mags;
-        std::sort(sorted_sq_mags.data(), sorted_sq_mags.data() + sorted_sq_mags.size());
+        std::vector<int> indices(sq_mags.size());
+        std::iota(indices.begin(), indices.end(), 0); 
+        std::sort(indices.begin(), indices.end(), [&sq_mags](size_t i1, size_t i2) {
+            return sq_mags(i1) < sq_mags(i2);
+        });
+        Eigen::VectorXd sorted_sq_mags(sq_mags.size());
+        for (size_t i = 0; i < indices.size(); ++i)
+        {            
+            sorted_sq_mags(i) = sq_mags(indices[i]);
+        }
 
         int cutoff_index;
         if (find_threshold_from_secant)
@@ -1243,20 +1231,15 @@ namespace polysolve::linear
         }
         else
         {
-            cutoff_index = sorted_sq_mags.size() * (1 - bad_dof_threshold);
+            cutoff_index = indices.size() * (1 - bad_dof_threshold);
         }
-        const double cutoff = sorted_sq_mags(cutoff_index);
-        logger->trace("Problematic threshold: {}", cutoff);
 
-        if (cutoff > 0)
+        const double cutoff = sorted_sq_mags(cutoff_index);
+        logger->trace("Problematic threshold: {}, cutoff: {}", cutoff, cutoff_index);
+
+        for (int i = cutoff_index; i < indices.size(); ++i)
         {
-            for (int i = 0; i < rhs.size(); ++i)
-            {
-                if (sq_mags(i) >= cutoff)
-                {
-                    bad_indices_[0].insert(i);
-                }
-            }
+            bad_indices_[0].insert(indices[i]);
         }
 
         if (save_selected_indices)
@@ -1369,14 +1352,14 @@ namespace polysolve::linear
         return result;
     }
 
-    void ExperimentalSolver::prepare_dss(Eigen::VectorXd &rhs)
+    void ExperimentalSolver::prepare_dss()
     {
         POLYSOLVE_SCOPED_STOPWATCH("prepare dss time", prepare_dss_time, *logger);
 #ifdef HYPRE_WITH_MPI
         if (myid == 0) 
         {
 #endif
-            select_bad_indices(rhs);
+            select_bad_indices();
 
             if (save_selected_indices)
             {
@@ -1396,16 +1379,44 @@ namespace polysolve::linear
         }
 #endif
 
-        scatter_subsystem();
-
-        if (myid == 0 && decompose_subdomains)
+        if (myid == 0)
         {
-            decompose_subdomains_to_disjoint_subsets();
+            if (decompose_subdomains)
+            {
+                decompose_subdomains_to_disjoint_subsets();
+                load_balance_subdomains();
+                compute_permutation_matrix();
+            }
+            else
+            {
+                load_balance_subdomains();
+                P.resize(sparse_A.rows());
+                P.setIdentity();
+                P_T = P.transpose();
+                partition_ranks();
+            }
+            sparse_A = P * sparse_A * P_T;
+            /*
+            std::ofstream file;
+            file.open("remapped_A.txt");
+            for (int k = 0; k < sparse_A.outerSize(); ++k)
+            {
+                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
+                {   
+                    file << it.row() + 1 << " " << it.col() + 1 << " " << it.value() << std::endl;
+                }
+            }
+            file.close();
+            std::ofstream P_file;
+            P_file.open("P.txt");
+            for (int i = 0; i < P.indices().size(); ++i)
+            {
+                P_file << i << " " << P.indices()[i] << std::endl;  
+            }*/
         }
 
+        scatter_matrix();
         share_bad_subdomains();
-        load_balance_subdomains();
-
         factorize_submatrix();
 
         if (myid == 0 && print_conditioning)
@@ -1416,69 +1427,62 @@ namespace polysolve::linear
         }
     }
 
-    void ExperimentalSolver::scatter_subsystem()
+    void ExperimentalSolver::compute_permutation_matrix()
     {
-        assert(bad_indices_.size() == 1);
-        if (bad_indices_.size() == 0 || bad_indices_[0].size() == 0)
+        P.resize(sparse_A.rows());
+
+        std::vector<bool> good_dofs(sparse_A.rows(), true);
+        for (auto &index_set : bad_indices_)
         {
-            bad_indices_.clear();
-            bad_indices_.resize(1);
+            for (auto index : index_set)
+            {
+                good_dofs[index] = false;
+            }
         }
 
-        logger->trace("starting sub scatter");
-        if (myid == 0)
+        int target_size = sparse_A.rows() / num_procs;
+        starts.clear();
+        ends.clear();
+        int current_index = 0;
+        int current_global_index = 0;
+        for (int i = 0; i < num_procs; ++i)
         {
-            global_to_entire_subdomain.clear();
-            entire_subdomain_to_global.resize(bad_indices_[0].size());
-            int li = 0;
-            for (auto gi : bad_indices_[0])
-            {
-                global_to_entire_subdomain[gi] = li;
-                entire_subdomain_to_global[li] = gi;
-                ++li;
-            }
+            starts.push_back(current_index);
 
-            std::vector<Eigen::Triplet<double>> triplets;
-            
-            for (int k : bad_indices_[0])
+            for (auto bs_i : bad_subdomain_assignments[i])
             {
-                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-                {   
-                    triplets.emplace_back(Eigen::Triplet<double>(global_to_entire_subdomain[it.row()], it.col(), it.value()));
+                for (auto index : bad_indices_[bs_i])
+                {
+                    P.indices()[index] = current_index;
+                    ++current_index;
                 }
             }
 
-            sparse_subsystem.resize(bad_indices_[0].size(), sparse_A.cols());
-            sparse_subsystem.setFromTriplets(triplets.begin(), triplets.end());
-        }
+            int target_end = (i == num_procs - 1) ? sparse_A.rows() : starts.back() + std::max(target_size, current_index - starts.back()) - 1;
+            ends.push_back(std::min(target_end, static_cast<int>(sparse_A.rows()) - 1));
 
-        int subdomain_size = myid == 0 ? bad_indices_[0].size() : 0;
-        int nnz = myid == 0? sparse_subsystem.nonZeros() : 0;
-
-        MPI_Bcast(&subdomain_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&nnz, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-        if (myid != 0)
-        {
-            global_to_entire_subdomain.clear();
-            entire_subdomain_to_global.resize(subdomain_size);
-            sparse_subsystem.resize(subdomain_size, sparse_A.cols());
-            sparse_subsystem.reserve(nnz);
-        }
-
-        MPI_Bcast(entire_subdomain_to_global.data(), subdomain_size, MPI_INT, 0, MPI_COMM_WORLD);
-        if (myid != 0)
-        {
-            global_to_entire_subdomain.reserve(subdomain_size);
-            for (int li = 0; li < subdomain_size; ++li)
+            while (current_index <= ends.back())
             {
-                global_to_entire_subdomain[entire_subdomain_to_global[li]] = li;
+                if (good_dofs[current_global_index])
+                {
+                    P.indices()[current_global_index] = current_index;
+                    ++current_index;
+                }
+                ++current_global_index;
             }
         }
 
-        MPI_Bcast(sparse_subsystem.valuePtr(), nnz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        MPI_Bcast(sparse_subsystem.innerIndexPtr(), nnz, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(sparse_subsystem.outerIndexPtr(), subdomain_size + 1, MPI_INT, 0, MPI_COMM_WORLD);
+        P_T = P.transpose();
+        std::vector<std::set<int>> remapped_bad_indices;
+        for (auto &subdomain : bad_indices_)
+        {
+            remapped_bad_indices.emplace_back();
+            for (auto index : subdomain)
+            {
+                remapped_bad_indices.back().insert(P.indices()[index]);
+            }
+        }
+        bad_indices_ = std::move(remapped_bad_indices);
     }
 
     void ExperimentalSolver::check_matrix_conditioning(const std::string name, const std::set<int>& subdomain)
@@ -1629,29 +1633,21 @@ namespace polysolve::linear
             starts.push_back(i == 0 ? 0 : local_size * i + i);
             ends.push_back(i == (num_procs - 1) ? sparse_A.rows() - 1 : starts.back() + local_size);
         }   
-        logger->trace("World size: {}, myid: {}", num_procs, myid);
-        logger->trace("start {}, end {}", starts[myid], ends[myid]);
-        local_result.resize(ends[myid] - starts[myid] + 1);
     }
 
     void ExperimentalSolver::scatter_matrix()
     {
+        POLYSOLVE_SCOPED_STOPWATCH("scatter matrix time", scatter_matrix_time, *logger);
     #ifdef HYPRE_WITH_MPI
         if (myid == 0 && num_procs > 1)
         {
-            int local_size = sparse_A.rows() / num_procs;
-
             std::vector<int> row_vec;
             std::vector<int> col_vec;
             std::vector<double> val_vec;
-            std::vector<int> starts, ends;
             std::vector<int> counts;
 
-            for (int i = 0; i < num_procs; ++i)
-            {
-                starts.push_back(i == 0 ? 0 : local_size * i + i);
-                ends.push_back(i == (num_procs - 1) ? sparse_A.rows() - 1 : starts.back() + local_size);
-            } 
+            MPI_Bcast(starts.data(), num_procs, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Bcast(ends.data(), num_procs, MPI_INT, 0, MPI_COMM_WORLD);
 
             std::vector<int> displs;
             for (int k = 0; k < sparse_A.outerSize(); ++k)
@@ -1688,6 +1684,14 @@ namespace polysolve::linear
         }
         else if (myid > 0)
         {
+            starts.clear();
+            ends.clear();
+            starts.resize(num_procs);
+            ends.resize(num_procs);
+
+            MPI_Bcast(starts.data(), num_procs, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Bcast(ends.data(), num_procs, MPI_INT, 0, MPI_COMM_WORLD);
+
             int problem_size;
             MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
             int my_size;
@@ -1712,6 +1716,8 @@ namespace polysolve::linear
         }
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
+        logger->trace("start {}, end {}", starts[myid], ends[myid]);
+        local_result.resize(ends[myid] - starts[myid] + 1);
     }
 
     void ExperimentalSolver::copy_matrix_to_hypre()
@@ -1782,6 +1788,8 @@ namespace polysolve::linear
         {
             result = sqrt_diag_A_inv * result;
         }
+
+        result = P_T * result;
     }
 
     void ExperimentalSolver::check_smallest_eigenvalue()
@@ -1862,7 +1870,7 @@ namespace polysolve::linear
         std::vector<Eigen::Triplet<double>> triplets;
         for (int k : bad_indices_[i])
         {
-            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_subsystem, global_to_entire_subdomain[k]); it; ++it)
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
             {
                 auto ind_it = index_mappings[bad_i].find(it.col());
                 if (ind_it != index_mappings[bad_i].end())
@@ -2047,6 +2055,12 @@ namespace polysolve::linear
                     MPI_Barrier(MPI_COMM_WORLD);
                 }
             }
+            for (int i = 0; i < num_procs; ++i)
+            {
+                int local_size = bad_subdomain_assignments[i].size();
+                MPI_Bcast(&local_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+                MPI_Bcast(bad_subdomain_assignments[i].data(), local_size, MPI_INT, 0, MPI_COMM_WORLD);
+            }
         } 
         else
         {
@@ -2065,6 +2079,14 @@ namespace polysolve::linear
                     bad_indices_[i].insert(index);
                 }
                 MPI_Barrier(MPI_COMM_WORLD);
+            }
+            bad_subdomain_assignments.resize(num_procs);
+            for (int i = 0; i < num_procs; ++i)
+            {
+                int local_size;
+                MPI_Bcast(&local_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+                bad_subdomain_assignments[i].resize(local_size);
+                MPI_Bcast(bad_subdomain_assignments[i].data(), local_size, MPI_INT, 0, MPI_COMM_WORLD);
             }
         }
 #endif
