@@ -495,7 +495,8 @@
             "min_subdomain_size",
             "max_subdomain_size",
             "jacobi_precondition_system",
-            "find_threshold_from_secant"
+            "find_threshold_from_secant",
+            "jacobi_damping_factor"
         ],
         "doc": "Settings for the Experimental solver."
     },
@@ -732,5 +733,11 @@
         "default": false,
         "type": "bool",
         "doc": "If true, find threshold from secant line."
+    },
+    {
+        "pointer": "/Experimental/jacobi_damping_factor",
+        "default": 1.0,
+        "type": "float",
+        "doc": "Damping factor for Jacobi preconditioning."
     }                                    
 ]

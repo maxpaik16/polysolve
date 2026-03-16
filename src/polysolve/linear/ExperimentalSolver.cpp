@@ -229,6 +229,10 @@ namespace polysolve::linear
             {
                 find_threshold_from_secant = params["Experimental"]["find_threshold_from_secant"];
             }
+            if (params["Experimental"].contains("jacobi_damping_factor"))
+            {
+                jacobi_damping_factor = params["Experimental"]["jacobi_damping_factor"];
+            }
         }
     }
 
@@ -944,7 +948,7 @@ namespace polysolve::linear
         if (jacobi_precond)
         {
             POLYSOLVE_SCOPED_STOPWATCH("jacobi time: ", jacobi_time, *logger);
-            eigen_x.segment(starts[myid], ends[myid] - starts[myid] + 1) = diag_inv * eigen_b.segment(starts[myid], ends[myid] - starts[myid] + 1);
+            eigen_x.segment(starts[myid], ends[myid] - starts[myid] + 1) = jacobi_damping_factor * diag_inv * eigen_b.segment(starts[myid], ends[myid] - starts[myid] + 1);
 #ifdef HYPRE_WITH_MPI
             // all_gather_vec(local_result, eigen_x);
 #endif
@@ -1003,8 +1007,6 @@ namespace polysolve::linear
                     for (int i = 0; i < subdomain.size(); ++i)
                     {
                         sub_rhs(index_mappings[index_counter][subdomain[i]]) = r(subdomain[i]) - sparse_A.row(subdomain[i]).dot(z);
-                        //logger->trace("A row sum: {}", sparse_A.row(subdomain[i]).cwiseAbs().sum());
-                        //logger->trace("Subdomain {}, dof {}, rhs value: {}, mystart/end: {}/{}", index, subdomain[i], sub_rhs(index_mappings[index_counter][subdomain[i]]), starts[myid], ends[myid]);
                     }
 
                     {
@@ -1283,7 +1285,7 @@ namespace polysolve::linear
         {
             Eigen::SparseMatrix<double> D;
             assemble_D(i_counter, i, D);
-
+            
             if (print_subdomain_conditioning)
             {
                 Eigen::EigenSolver<Eigen::MatrixXd> es(D);
@@ -1384,35 +1386,15 @@ namespace polysolve::linear
             if (decompose_subdomains)
             {
                 decompose_subdomains_to_disjoint_subsets();
-                load_balance_subdomains();
-                compute_permutation_matrix();
             }
-            else
+            load_balance_subdomains();
+            compute_permutation_matrix();
+
+            double perm_time;
             {
-                load_balance_subdomains();
-                P.resize(sparse_A.rows());
-                P.setIdentity();
-                P_T = P.transpose();
-                partition_ranks();
+                POLYSOLVE_SCOPED_STOPWATCH("permute matrix time", perm_time, *logger);
+                sparse_A = sparse_A.twistedBy(P);
             }
-            sparse_A = P * sparse_A * P_T;
-            /*
-            std::ofstream file;
-            file.open("remapped_A.txt");
-            for (int k = 0; k < sparse_A.outerSize(); ++k)
-            {
-                for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-                {   
-                    file << it.row() + 1 << " " << it.col() + 1 << " " << it.value() << std::endl;
-                }
-            }
-            file.close();
-            std::ofstream P_file;
-            P_file.open("P.txt");
-            for (int i = 0; i < P.indices().size(); ++i)
-            {
-                P_file << i << " " << P.indices()[i] << std::endl;  
-            }*/
         }
 
         scatter_matrix();
@@ -1429,55 +1411,91 @@ namespace polysolve::linear
 
     void ExperimentalSolver::compute_permutation_matrix()
     {
-        P.resize(sparse_A.rows());
+        int num_rows = sparse_A.rows();
+        int num_blocks = num_rows / dimension_; 
+        
+        P.resize(num_rows);
+        
+        std::vector<uint8_t> good_blocks(num_blocks, 1);
+        std::vector<uint8_t> block_mapped(num_blocks, 0);
 
-        std::vector<bool> good_dofs(sparse_A.rows(), true);
-        for (auto &index_set : bad_indices_)
+        for (const auto &index_set : bad_indices_)
         {
-            for (auto index : index_set)
+            for (int index : index_set)
             {
-                good_dofs[index] = false;
+                good_blocks[index / dimension_] = 0;
             }
         }
 
-        int target_size = sparse_A.rows() / num_procs;
+        int target_size_blocks = num_blocks / num_procs;
+        int target_size_dofs = target_size_blocks * dimension_;
+
         starts.clear();
         ends.clear();
-        int current_index = 0;
-        int current_global_index = 0;
+        
+        int current_dof_index = 0;
+        int current_global_block = 0;
+
         for (int i = 0; i < num_procs; ++i)
         {
-            starts.push_back(current_index);
+            starts.push_back(current_dof_index);
 
-            for (auto bs_i : bad_subdomain_assignments[i])
+            for (int bs_i : bad_subdomain_assignments[i])
             {
-                for (auto index : bad_indices_[bs_i])
+                for (int index : bad_indices_[bs_i])
                 {
-                    P.indices()[index] = current_index;
-                    ++current_index;
+                    int block_idx = index / dimension_;
+
+                    if (!block_mapped[block_idx])
+                    {
+                        for (int offset = 0; offset < dimension_; ++offset)
+                        {
+                            P.indices()[block_idx * dimension_ + offset] = current_dof_index++;
+                        }
+                        block_mapped[block_idx] = 1;
+                    }
                 }
             }
 
-            int target_end = (i == num_procs - 1) ? sparse_A.rows() : starts.back() + std::max(target_size, current_index - starts.back()) - 1;
-            ends.push_back(std::min(target_end, static_cast<int>(sparse_A.rows()) - 1));
-
-            while (current_index <= ends.back())
+            int target_end;
+            if (i == num_procs - 1) 
             {
-                if (good_dofs[current_global_index])
+                target_end = num_rows - 1; // Last rank absorbs any remainder
+            } 
+            else 
+            {
+                int current_rank_dofs = current_dof_index - starts.back();
+                int target_dofs_total = std::max(target_size_dofs, current_rank_dofs);
+                
+                target_dofs_total = (target_dofs_total / dimension_) * dimension_; 
+                target_end = starts.back() + target_dofs_total - 1;
+            }
+            
+            ends.push_back(std::min(target_end, num_rows - 1));
+
+            while (current_dof_index <= ends.back() && current_global_block < num_blocks)
+            {
+                if (good_blocks[current_global_block] && !block_mapped[current_global_block])
                 {
-                    P.indices()[current_global_index] = current_index;
-                    ++current_index;
+                    for (int offset = 0; offset < dimension_; ++offset)
+                    {
+                        P.indices()[current_global_block * dimension_ + offset] = current_dof_index++;
+                    }
+                    block_mapped[current_global_block] = 1;
                 }
-                ++current_global_index;
+                ++current_global_block;
             }
         }
-
+        
         P_T = P.transpose();
+
         std::vector<std::set<int>> remapped_bad_indices;
-        for (auto &subdomain : bad_indices_)
+        remapped_bad_indices.reserve(bad_indices_.size());
+        
+        for (const auto &subdomain : bad_indices_)
         {
             remapped_bad_indices.emplace_back();
-            for (auto index : subdomain)
+            for (int index : subdomain)
             {
                 remapped_bad_indices.back().insert(P.indices()[index]);
             }
@@ -1644,12 +1662,16 @@ namespace polysolve::linear
             std::vector<int> row_vec;
             std::vector<int> col_vec;
             std::vector<double> val_vec;
-            std::vector<int> counts;
+            std::vector<int> sizes(num_procs);
+            std::vector<int> displs;
+
+            row_vec.reserve(sparse_A.nonZeros());
+            col_vec.reserve(sparse_A.nonZeros());
+            val_vec.reserve(sparse_A.nonZeros());
 
             MPI_Bcast(starts.data(), num_procs, MPI_INT, 0, MPI_COMM_WORLD);
             MPI_Bcast(ends.data(), num_procs, MPI_INT, 0, MPI_COMM_WORLD);
 
-            std::vector<int> displs;
             for (int k = 0; k < sparse_A.outerSize(); ++k)
             {
                 for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
@@ -1665,7 +1687,6 @@ namespace polysolve::linear
                 }
             }
 
-            std::vector<int> sizes(num_procs);
             int proc_index = 0;
             sizes[0] = 0;
             sizes.back() = row_vec.size() - displs.back(); 
@@ -1673,7 +1694,7 @@ namespace polysolve::linear
             {
                 sizes[i] = displs[i + 1] - displs[i];
             }            
-
+            
             int problem_size = sparse_A.rows();
             MPI_Bcast(&problem_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
             int root_size;

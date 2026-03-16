@@ -107,6 +107,9 @@ namespace polysolve::linear
         int project_d_option = 0;
         bool find_threshold_from_secant = false;
 
+        // Jacobi settings
+        double jacobi_damping_factor = 1.;
+
         // General solver settings
         int dimension_ = 1; // 1 = scalar (Laplace), 2 or 3 = vector (Elasticity)
         int max_iter_ = 1000;
