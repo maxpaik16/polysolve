@@ -23,10 +23,12 @@
 #include <unistd.h>
 #include <sys/resource.h>
 
+#include <Eigen/PardisoSupport>
+
 
 void usage(const std::string &executable)
 {
-    std::cout << "Usage: " << executable << " solver A_file b_file param_file num_trials [ind_file]" << std::endl;
+    std::cout << "Usage: " << executable << " solver A_file b_file param_file num_trials [ind_file] [DEBUG]" << std::endl;
 }
 
 
@@ -41,7 +43,7 @@ size_t getPeakRSS()
 int main(int argc, char **argv)
 {
     std::srand((unsigned int) std::time(nullptr));
-    if (argc != 6 && argc != 7)
+    if (argc != 6 && argc != 7 && argc != 8)
     {
         const std::string executable(argv[0]);
         usage(executable);
@@ -49,9 +51,10 @@ int main(int argc, char **argv)
     }
 
     int done_already;
-
-    MPI_Initialized(&done_already);
     int myid = 0, num_procs = 1;
+
+#if HYPRE_WITH_MPI
+    MPI_Initialized(&done_already);
     if (!done_already)
     {
         // Initialize MPI 
@@ -60,6 +63,7 @@ int main(int argc, char **argv)
 
     MPI_Comm_rank(MPI_COMM_WORLD, &myid);
     MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
+#endif
 
     // Create logger
     const std::string logger_name = "solver-" + std::to_string(myid);
@@ -70,7 +74,7 @@ int main(int argc, char **argv)
     } 
     else
     {
-        logger->set_level(spdlog::level::off);
+        logger->set_level(argc == 8 ? spdlog::level::trace : spdlog::level::off);
     }
 
     const char *num_threads_c_str = std::getenv("OMP_NUM_THREADS");
@@ -184,49 +188,65 @@ int main(int argc, char **argv)
         logger->trace("Problem size: {}, nnzs: {}", rows, nnzs);
     }
 
-    if (solver_str != "Experimental")
+    if (solver_str != "Experimental" && solver_str != "GPUHybrid")
     {
-        if (myid == 0)
+        double all_solves_time;
         {
+            POLYSOLVE_SCOPED_STOPWATCH("outer loop solve time", all_solves_time, *logger);
             Eigen::VectorXd x(rows);
             logger->info("Starting solve...");
+            //std::vector<Eigen::PardisoLDLT<Eigen::SparseMatrix<double>>> solvers(num_trials);
 
-            for (int solve_i = 0; solve_i < num_trials; ++solve_i)
+            /*double fact_time;
             {
-                double solve_time;
-                x.setZero();
-                if (b_file == "NONE")
+                POLYSOLVE_SCOPED_STOPWATCH("factorization time", fact_time, *logger);
+                for (int i = 0; i < num_trials; ++i)
                 {
-                    b = Eigen::VectorXd::Random(rows);
+                    //solvers[i].compute(A);  
                 }
-                {
-                    POLYSOLVE_SCOPED_STOPWATCH("total solve time", solve_time, *logger);
-                    solver->analyze_pattern(A, A.rows());
-                    solver->factorize(A);
-                    solver->solve(b, x);
-                    logger->trace("Residual: {}", (b - A*x).norm());
-                }
+                MPI_Barrier(MPI_COMM_WORLD);
+            }*/
 
+            solver->analyze_pattern(A, A.rows());
+            solver->factorize(A);
+
+            //double bsub_time;
+            {
+                //POLYSOLVE_SCOPED_STOPWATCH("back sub time", bsub_time, *logger);
+                for (int solve_i = 0; solve_i < num_trials; ++solve_i)
+                {
+                    double solve_time;
+                    x.setZero();
+                    if (b_file == "NONE")
+                    {
+                        b = Eigen::VectorXd::Random(rows);
+                    }
+                    {
+                        POLYSOLVE_SCOPED_STOPWATCH("total solve time", solve_time, *logger);
+                        //x = solvers[solve_i].solve(b);
+                        solver->solve(b, x);
+                        logger->trace("Residual: {}", (b - A*x).norm());
+                    }
+
+                }
+#if HYPRE_WITH_MPI
+                MPI_Barrier(MPI_COMM_WORLD);
+#endif
             }   
-
-            logger->trace("RSS: {}", getPeakRSS());
-            logger->flush();
-            MPI_Abort(MPI_COMM_WORLD, 0);
-            int finalized;
-            MPI_Finalized(&finalized);
-            if (!finalized)
-                MPI_Finalize();
-            HYPRE_Finalize();
-            
-            return 0;
         }
-        else
-        {
-            while (true) { 
-                 struct timespec ts = {1, 0}; // 1 second
-                 nanosleep(&ts, NULL); 
-             }
-        }
+        logger->trace("RSS: {}", getPeakRSS());
+        logger->flush();
+#if HYPRE_WITH_MPI
+        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Abort(MPI_COMM_WORLD, 0);
+        int finalized;
+        MPI_Finalized(&finalized);
+        if (!finalized)
+            MPI_Finalize();
+        HYPRE_Finalize();
+#endif
+        
+        return 0;
     }
 
     Eigen::VectorXd x;
@@ -265,14 +285,16 @@ int main(int argc, char **argv)
     }   
 
     logger->trace("RSS: {}", getPeakRSS());
-
     logger->flush();
+
+#if HYPRE_WITH_MPI
 	MPI_Abort(MPI_COMM_WORLD, 0);
 	int finalized;
     MPI_Finalized(&finalized);
     if (!finalized)
         MPI_Finalize();
 	HYPRE_Finalize();
+#endif
     
     return 0;
 }

@@ -62,7 +62,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0135 NEW) # Set the timestamps of all extracted cont
 
 project(PolySolve
         DESCRIPTION "Easy-to-use wrapper for linear solver"
-        LANGUAGES CXX C)
+        LANGUAGES CXX C CUDA)
 
 if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64" AND APPLE)
     set(POLYSOLVE_NOT_ON_APPLE_SILICON OFF)
@@ -88,7 +88,7 @@ option(POLYSOLVE_WITH_PARDISO       "Enable Pardiso library"                    
 option(POLYSOLVE_WITH_HYPRE         "Enable hypre"                                       ON)
 option(POLYSOLVE_WITH_AMGCL         "Use AMGCL"                                          ON)
 option(POLYSOLVE_WITH_SPECTRA       "Enable Spectra library"                             ON)
-option(POLYSOLVE_WITH_ICHOL         "Enable use of incomplete Cholesky preconditioner"   ON)
+option(POLYSOLVE_WITH_ICHOL         "Enable use of incomplete Cholesky preconditioner"   OFF)
 
 # Sanitizer options
 option(POLYSOLVE_SANITIZE_ADDRESS   "Sanitize Address"                                  OFF)
