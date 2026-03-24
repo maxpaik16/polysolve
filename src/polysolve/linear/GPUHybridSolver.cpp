@@ -495,9 +495,6 @@ namespace polysolve::linear
         }
 
         bad_indices_arrays.clear();
-        owned_counts.clear();
-        owned_counts.resize(bad_indices_.size());
-
         logger->trace("Num subdomains: {}", bad_indices_.size());
 
         int i = 0;
@@ -506,23 +503,8 @@ namespace polysolve::linear
             logger->trace("Subdomain size: {}", subdomain.size() + overlap_extensions[i].size());
             std::vector<int> cpu_buff(subdomain.begin(), subdomain.end());
             bad_indices_arrays.emplace_back(cpu_buff.begin(), cpu_buff.end());
-            //bad_indices_arrays.back().insert(bad_indices_arrays.back().end(), overlap_extensions[i].begin(), overlap_extensions[i].end());
-            //owned_counts[i] = subdomain.size();
             ++i;
         }
-
-        //h_node_multiplicity.clear();
-        //h_node_multiplicity.resize(sparse_A.rows());
-        //for (const auto& cpu_map : bad_indices_arrays) 
-        //{
-        //    for (int global_idx : cpu_map) 
-        //    {
-        //        h_node_multiplicity[global_idx]++;
-        //    }
-        //}
-
-        //d_node_multiplicity = h_node_multiplicity;
-        //raw_d_multiplicity = thrust::raw_pointer_cast(d_node_multiplicity.data());
 
         CHECK_CUDA(cudaDeviceSynchronize());
         factorize_submatrix();
@@ -571,7 +553,7 @@ namespace polysolve::linear
             }
             if (kv.second.size() > max_subdomain_size)
             {
-                partition_subdomain(kv.second, overlap_extensions);
+                //partition_subdomain(kv.second, overlap_extensions);
                 continue;
             }
             bad_indices_.emplace_back(kv.second.begin(), kv.second.end());
@@ -723,7 +705,6 @@ namespace polysolve::linear
         
         bad_indices_.clear();
         bad_indices_.resize(1);
-        // 1. Extract diagonal magnitudes on CPU using Eigen
         Eigen::VectorXd sq_mags;
         {
             POLYSOLVE_SCOPED_STOPWATCH("select dofs from hess diagonal", select_dofs_from_diag_time, *logger);
@@ -731,45 +712,35 @@ namespace polysolve::linear
         }
 
         int n = sq_mags.size();
-        if (n == 0) return; // Quick safety check
+        if (n == 0) return; 
 
-        // 2. Transfer data to GPU
-        // Eigen::VectorXd stores data contiguously, so we can pass its pointer directly to Thrust
         thrust::device_vector<double> d_sq_mags(sq_mags.data(), sq_mags.data() + n);
         
-        // Create and populate the indices array (0, 1, 2, ..., n-1)
         thrust::device_vector<int> d_indices(n);
         thrust::sequence(d_indices.begin(), d_indices.end());
 
-        // 3. Argsort: Sorts d_sq_mags in place and permutes d_indices to match
         thrust::sort_by_key(d_sq_mags.begin(), d_sq_mags.end(), d_indices.begin());
 
-        // 4. Compute Logarithms on GPU
         thrust::device_vector<double> d_log_sorted(n);
         thrust::transform(d_sq_mags.begin(), d_sq_mags.end(), d_log_sorted.begin(), 
                           [] __device__ (double val) { return log(val); });
 
-        // Since the array is sorted and log() is monotonic, min and max are just the first and last elements
         double min_mag = d_log_sorted.front();
         double max_mag = d_log_sorted.back();
 
-        // 5. Compute deviations on GPU
         thrust::device_vector<double> d_deviations(n);
         
-        // We use a counting iterator to represent 'i' and pair it with 'd_log_sorted' in a binary transform
         thrust::transform(
             thrust::make_counting_iterator(0),
             thrust::make_counting_iterator(n),
             d_log_sorted.begin(),
             d_deviations.begin(),
             [min_mag, max_mag, n] __device__ (int i, double log_y) {
-                // Use fabs() for device-side double absolute value
                 double expected_y = (max_mag - min_mag) / (n - 1.0) * i + min_mag;
                 return fabs(expected_y - log_y);
             }
         );
 
-        // 6. Find the index of the maximum deviation
         auto max_dev_iter = thrust::max_element(d_deviations.begin(), d_deviations.end());
         int cutoff_index = thrust::distance(d_deviations.begin(), max_dev_iter);
         
@@ -778,16 +749,13 @@ namespace polysolve::linear
             cutoff_index = n * (1.0 - bad_dof_threshold);
         }
 
-        // Retrieve the cutoff value from the GPU
         const double cutoff = d_sq_mags[cutoff_index];
         logger->trace("Problematic threshold: {}, cutoff index: {}", cutoff, cutoff_index);
 
-        // 7. Transfer ONLY the bad indices back to the CPU
         int num_bad = n - cutoff_index;
         std::vector<int> h_bad_indices(num_bad);
         thrust::copy(d_indices.begin() + cutoff_index, d_indices.end(), h_bad_indices.begin());
 
-        // 8. Insert into your tracking structure
         for (int idx : h_bad_indices)
         {
             bad_indices_[0].insert(idx);
@@ -804,14 +772,8 @@ namespace polysolve::linear
         build_index_mappings();
         free_device_memory();
 
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 0");
-
         CHECK_CUDSS(cudssConfigCreate(&config));
         CHECK_CUDSS(cudssDataCreate(cudss_handle, &solverData));
-
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 1");
 
         h_nrows.clear();
         h_ncols.clear();
@@ -826,9 +788,6 @@ namespace polysolve::linear
         int total_bad_dofs = 0;
         all_bad_dof_map.clear();
 
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 2");
-
         for (auto &ba : bad_indices_arrays)
         {
             total_bad_dofs += ba.size();
@@ -840,24 +799,19 @@ namespace polysolve::linear
             all_bad_dof_map.insert(all_bad_dof_map.end(), ba.begin(), ba.end());
         }
 
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 3");
-
         std::vector<Eigen::SparseMatrix<double, Eigen::RowMajor>> cpu_matrices(batchCount);
         
         int total_row_offsets = 0; // sum of (nrows + 1)
         int total_nnz = 0;         // sum of non-zeros
 
-        // --- PHASE 1: ASSEMBLE AND COUNT ---
         for (int i = 0; i < batchCount; ++i)
         {
-            assemble_D(i, i, cpu_matrices[i]); // Assuming i_counter == i
+            assemble_D(i, i, cpu_matrices[i]); 
 
             int m_nrows = cpu_matrices[i].rows();
             int m_ncols = cpu_matrices[i].cols();
             int m_nnz   = cpu_matrices[i].nonZeros();
 
-            // Persist dimensions in host memory
             h_nrows.push_back(m_nrows);
             h_ncols.push_back(m_ncols);
             h_nnz.push_back(m_nnz);
@@ -868,7 +822,6 @@ namespace polysolve::linear
             total_nnz += m_nnz;
         }
 
-        // --- PHASE 2: PACK INTO CONTIGUOUS CPU MEMORY ---
         std::vector<int> h_all_rowOffsets(total_row_offsets);
         std::vector<int> h_all_colIndices(total_nnz);
         std::vector<double> h_all_values(total_nnz);
@@ -882,7 +835,6 @@ namespace polysolve::linear
             int current_rows = D.rows();
             int current_nnz = D.nonZeros();
 
-            // Lightning-fast memcpy on the CPU side
             std::memcpy(&h_all_rowOffsets[offset_rows], D.outerIndexPtr(), (current_rows + 1) * sizeof(int));
             std::memcpy(&h_all_colIndices[offset_nnz], D.innerIndexPtr(), current_nnz * sizeof(int));
             std::memcpy(&h_all_values[offset_nnz], D.valuePtr(), current_nnz * sizeof(double));
@@ -891,7 +843,6 @@ namespace polysolve::linear
             offset_nnz += current_nnz;
         }
 
-        // --- PHASE 3: THE 3 MEGA-ALLOCATIONS & TRANSFERS ---
         int* d_all_rowOffsets;
         int* d_all_colIndices;
         double* d_all_values;
@@ -904,7 +855,6 @@ namespace polysolve::linear
         CHECK_CUDA(cudaMemcpy(d_all_colIndices, h_all_colIndices.data(), total_nnz * sizeof(int), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(d_all_values, h_all_values.data(), total_nnz * sizeof(double), cudaMemcpyHostToDevice));
 
-        // --- PHASE 4: ASSIGN SUB-POINTERS FOR CUDSS ---
         offset_rows = 0;
         offset_nnz = 0;
 
@@ -913,7 +863,6 @@ namespace polysolve::linear
             int current_rows = h_nrows[i];
             int current_nnz = h_nnz[i];
 
-            // Pointer arithmetic advances by the type size (int/double), so we just add the offset
             h_csrRowOffsets_void.push_back(static_cast<void*>(d_all_rowOffsets + offset_rows));
             h_csrColIndices_void.push_back(static_cast<void*>(d_all_colIndices + offset_nnz));
             h_csrValues_void.push_back(static_cast<void*>(d_all_values + offset_nnz));
@@ -922,21 +871,12 @@ namespace polysolve::linear
             offset_nnz += current_nnz;
         }
 
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 4");
-
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 5");
-
         CHECK_CUDA(cudaMalloc(&d_csrRowOffsets_void, batchCount * sizeof(void*)));
         CHECK_CUDA(cudaMalloc(&d_csrColIndices_void, batchCount * sizeof(void*)));
         CHECK_CUDA(cudaMalloc(&d_csrValues_void, batchCount * sizeof(void*)));
 
         CHECK_CUDA(cudaMalloc(&d_x, total_bad_dofs * sizeof(double)));
         CHECK_CUDA(cudaMalloc(&d_b, total_bad_dofs * sizeof(double)));
-
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 6");
 
         h_x_void.push_back(static_cast<void*>(d_x));
         h_b_void.push_back(static_cast<void*>(d_b));
@@ -950,19 +890,12 @@ namespace polysolve::linear
         CHECK_CUDA(cudaMalloc(&d_x_void, batchCount * sizeof(void*)));
         CHECK_CUDA(cudaMalloc(&d_b_void, batchCount * sizeof(void*)));
 
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 7");
-
-        // Copy Pointer Arrays to GPU
         CHECK_CUDA(cudaMemcpy(d_csrRowOffsets_void, h_csrRowOffsets_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(d_csrColIndices_void, h_csrColIndices_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(d_csrValues_void, h_csrValues_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
 
         CHECK_CUDA(cudaMemcpy(d_x_void, h_x_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(d_b_void, h_b_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
-
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 8");
 
         CHECK_CUDSS(cudssMatrixCreateBatchDn(
             &batchMatrixX, batchCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), 
@@ -973,9 +906,6 @@ namespace polysolve::linear
             &batchMatrixB, batchCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), 
             d_b_void, CUDA_R_32I, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
         ));
-
-        CHECK_CUDA(cudaDeviceSynchronize());
-        logger->trace("Checkpoint 9");
 
         {
             POLYSOLVE_SCOPED_STOPWATCH("factorize D", dss_factorization_time, *logger);

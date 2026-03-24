@@ -100,10 +100,6 @@ namespace polysolve::linear
         // hybrid preconditioner data
         std::vector<thrust::device_vector<int>> bad_indices_arrays;
         std::vector<std::unordered_map<int, int>> index_mappings;
-        std::vector<int> owned_counts;
-        std::vector<int> h_node_multiplicity;
-        int* raw_d_multiplicity;
-        thrust::device_vector<int> d_node_multiplicity;
         thrust::device_vector<int> all_bad_dof_map;
 
         // cudss data
