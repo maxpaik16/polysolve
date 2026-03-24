@@ -63,8 +63,9 @@ namespace polysolve::linear {
 #ifdef POLYSOLVE_WITH_CUSOLVER
 #include "CuSolverDN.cuh"
 #endif
-//#include "ExperimentalSolver.hpp"
+#include "ExperimentalSolver.hpp"
 #include "GPUHybridSolver.hpp"
+#include "CUDSS.hpp"
 #include <unsupported/Eigen/IterativeSolvers>
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -483,13 +484,17 @@ namespace polysolve::linear
         {
             RETURN_DIRECT_DENSE_SOLVER_PTR(LDLT, "Eigen::LDLT");
         }
-        //else if (solver == "Experimental")
-        //{
-        //    return std::make_unique<ExperimentalSolver>();
-        //}
+        else if (solver == "Experimental")
+        {
+            return std::make_unique<ExperimentalSolver>();
+        }
         else if (solver == "GPUHybridSolver")
         {
             return std::make_unique<GPUHybridSolver>();
+        }
+        else if (solver == "CUDSS")
+        {
+            return std::make_unique<CUDSS>();
         }
         // else if (solver == "Eigen::BDCSVD")
         // {
@@ -566,8 +571,9 @@ namespace polysolve::linear
             "Eigen::CompleteOrthogonalDecomposition",
             "Eigen::LLT",
             "Eigen::LDLT",
-            //"Experimental",
-            "GPUHybridSolver"
+            "Experimental",
+            "GPUHybridSolver",
+            "CUDSS"
             // "Eigen::BDCSVD",
             // "Eigen::JacobiSVD"
         }};

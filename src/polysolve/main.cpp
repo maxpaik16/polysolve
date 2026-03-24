@@ -16,7 +16,12 @@
 #include "linear/Solver.hpp"
 #include "Utils.hpp"
 
+#define HYPRE_WITH_MPI 1
+
+#ifdef HYPRE_WITH_MPI
 #include <mpi.h>
+#endif
+
 #include <HYPRE_struct_ls.h>
 
 #include <stdio.h>
@@ -53,11 +58,11 @@ int main(int argc, char **argv)
     int done_already;
     int myid = 0, num_procs = 1;
 
-#if HYPRE_WITH_MPI
+#ifdef HYPRE_WITH_MPI
     MPI_Initialized(&done_already);
     if (!done_already)
     {
-        // Initialize MPI 
+        // Initialize MPI
         MPI_Init(&argc, &argv);
     }
 
@@ -188,7 +193,7 @@ int main(int argc, char **argv)
         logger->trace("Problem size: {}, nnzs: {}", rows, nnzs);
     }
 
-    if (solver_str != "Experimental" && solver_str != "GPUHybrid")
+    if (solver_str != "Experimental" && solver_str != "GPUHybridSolver")
     {
         double all_solves_time;
         {
@@ -229,14 +234,14 @@ int main(int argc, char **argv)
                     }
 
                 }
-#if HYPRE_WITH_MPI
+#ifdef HYPRE_WITH_MPI
                 MPI_Barrier(MPI_COMM_WORLD);
 #endif
             }   
         }
         logger->trace("RSS: {}", getPeakRSS());
         logger->flush();
-#if HYPRE_WITH_MPI
+#ifdef HYPRE_WITH_MPI
         MPI_Barrier(MPI_COMM_WORLD);
         MPI_Abort(MPI_COMM_WORLD, 0);
         int finalized;
@@ -274,6 +279,7 @@ int main(int argc, char **argv)
         {
             b = Eigen::VectorXd::Random(rows);
         }
+        
         {
             POLYSOLVE_SCOPED_STOPWATCH("total solve time", solve_time, *logger);
             solver->analyze_pattern(A, A.rows());
@@ -287,7 +293,7 @@ int main(int argc, char **argv)
     logger->trace("RSS: {}", getPeakRSS());
     logger->flush();
 
-#if HYPRE_WITH_MPI
+#ifdef HYPRE_WITH_MPI
 	MPI_Abort(MPI_COMM_WORLD, 0);
 	int finalized;
     MPI_Finalized(&finalized);

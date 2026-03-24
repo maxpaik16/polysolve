@@ -9,3 +9,8 @@ PolySolveOptions.cmake
 .vs
 new-build*
 gpu-build/**
+hybrid-build/**
+p-amg.json
+p.json
+cuda-build/**
+ss_mats/**

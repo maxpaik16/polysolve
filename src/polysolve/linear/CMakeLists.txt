@@ -17,6 +17,10 @@ set(SOURCES
     SaddlePointSolver.hpp
     GPUHybridSolver.cpp
     GPUHybridSolver.hpp
+    CUDSS.cpp
+    CUDSS.hpp
+    ExperimentalSolver.cpp
+    ExperimentalSolver.hpp
 )
 
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Source Files" FILES ${SOURCES})

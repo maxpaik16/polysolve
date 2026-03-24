@@ -159,6 +159,17 @@ add_library(polysolve::linear ALIAS polysolve_linear)
 add_subdirectory(src/polysolve)
 add_subdirectory(src/polysolve/linear)
 
+# Force CMake to compile the .cpp file using the CUDA compiler (nvcc)
+set_source_files_properties(
+    src/polysolve/linear/GPUHybridSolver.cpp 
+    PROPERTIES LANGUAGE CUDA
+)
+
+# Tell nvcc to allow __device__ lambdas
+target_compile_options(polysolve_linear PRIVATE 
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-extended-lambda>
+)
+
 add_library(polysolve)
 add_library(polysolve::polysolve ALIAS polysolve)
 add_subdirectory(src/polysolve/nonlinear)
@@ -304,6 +315,10 @@ endif()
 
 find_package(METIS REQUIRED)
 target_link_libraries(polysolve_linear PRIVATE METIS::METIS)
+
+set(cudss_DIR "/mnt/ssd2/mjp16/Development/libcudss-linux-x86_64-0.7.1.4_cuda12-archive/lib/cmake/cudss")
+find_package(cudss REQUIRED)
+target_link_libraries(polysolve_linear PUBLIC cudss)
 
 # Spectra (MPL 2.0)
 if(POLYSOLVE_WITH_SPECTRA)

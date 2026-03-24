@@ -60,6 +60,8 @@ namespace polysolve::linear
         MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 
         Eigen::setNbThreads(1);
+        HYPRE_SetMemoryLocation(HYPRE_MEMORY_HOST);
+        HYPRE_SetExecutionPolicy(HYPRE_EXEC_HOST);
         
 #else
         Eigen::setNbThreads(num_threads);
@@ -909,7 +911,6 @@ namespace polysolve::linear
             return;
         }
 
-        assert(bad_indices_.size() == 1);
         if (!do_mixed_precond || bad_indices_.size() == 0 || bad_indices_[0].size() == 0)
         {
             amg_precond_iter(precond, r, z1);
@@ -1416,8 +1417,8 @@ namespace polysolve::linear
         
         P.resize(num_rows);
         
-        std::vector<uint8_t> good_blocks(num_blocks, 1);
-        std::vector<uint8_t> block_mapped(num_blocks, 0);
+        std::vector<uint32_t> good_blocks(num_blocks, 1);
+        std::vector<uint32_t> block_mapped(num_blocks, 0);
 
         for (const auto &index_set : bad_indices_)
         {
