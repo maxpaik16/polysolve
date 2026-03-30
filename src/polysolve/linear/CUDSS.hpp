@@ -24,27 +24,21 @@ namespace polysolve::linear {
         void free_device_memory();
 
         double pattern_analysis_time, factorization_time, solve_time;
+        double reordering_time, symbolic_time;
 
         // cuDSS Handles and Descriptors
         cudssHandle_t cudss_handle = nullptr;
         cudssConfig_t config = nullptr;
         cudssData_t solverData = nullptr;
         
-        cudssMatrix_t batchMatrixA = nullptr;
-        cudssMatrix_t batchMatrixX = nullptr;
-        cudssMatrix_t batchMatrixB = nullptr;
+        cudssMatrix_t MatrixA = nullptr;
+        cudssMatrix_t MatrixX = nullptr;
+        cudssMatrix_t MatrixB = nullptr;
 
         // Dimensions (kept as class members to ensure pointers survive across phases)
         int m_nrows = 0;
         int m_ncols = 0;
         int m_nnz = 0;
-        int m_batchCount = 1;
-
-        std::vector<int> h_nrows;
-        std::vector<int> h_ncols;
-        std::vector<int> h_nnz;
-        std::vector<int> h_vec_ncols;
-        std::vector<int> h_ld;
 
         // Device memory pointers (Arrays)
         int* d_csrRowOffsets = nullptr;
@@ -52,12 +46,5 @@ namespace polysolve::linear {
         double* d_csrValues = nullptr;
         double* d_x = nullptr;
         double* d_b = nullptr;
-
-        // Device memory pointers (Arrays of pointers for cuDSS Batch API)
-        void **d_csrRowOffsets_void = nullptr;
-        void **d_csrColIndices_void = nullptr;
-        void **d_csrValues_void = nullptr;
-        void **d_x_void = nullptr;
-        void **d_b_void = nullptr;
     };
 }

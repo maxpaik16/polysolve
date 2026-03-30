@@ -33,6 +33,7 @@ namespace polysolve::linear {
 
     CUDSS::CUDSS() {
         CHECK_CUDSS(cudssCreate(&cudss_handle));
+        CHECK_CUDSS(cudssSetThreadingLayer(cudss_handle, "/usr/lib/x86_64-linux-gnu/libcudss_mtlayer_gomp.so"));
     }
 
     CUDSS::~CUDSS() {
@@ -45,18 +46,11 @@ namespace polysolve::linear {
 
     void CUDSS::free_device_memory() {
         // Destroy cuDSS Opaque Structures
-        if (batchMatrixA) { cudssMatrixDestroy(batchMatrixA); batchMatrixA = nullptr; }
-        if (batchMatrixX) { cudssMatrixDestroy(batchMatrixX); batchMatrixX = nullptr; }
-        if (batchMatrixB) { cudssMatrixDestroy(batchMatrixB); batchMatrixB = nullptr; }
+        if (MatrixA) { cudssMatrixDestroy(MatrixA); MatrixA = nullptr; }
+        if (MatrixX) { cudssMatrixDestroy(MatrixX); MatrixX = nullptr; }
+        if (MatrixB) { cudssMatrixDestroy(MatrixB); MatrixB = nullptr; }
         if (solverData)   { cudssDataDestroy(cudss_handle, solverData); solverData = nullptr; }
         if (config)       { cudssConfigDestroy(config); config = nullptr; }
-
-        // Free GPU Pointer Arrays
-        if (d_csrRowOffsets_void) { cudaFree(d_csrRowOffsets_void); d_csrRowOffsets_void = nullptr; }
-        if (d_csrColIndices_void) { cudaFree(d_csrColIndices_void); d_csrColIndices_void = nullptr; }
-        if (d_csrValues_void)     { cudaFree(d_csrValues_void); d_csrValues_void = nullptr; }
-        if (d_x_void)             { cudaFree(d_x_void); d_x_void = nullptr; }
-        if (d_b_void)             { cudaFree(d_b_void); d_b_void = nullptr; }
 
         // Free GPU Data Arrays
         if (d_csrRowOffsets) { cudaFree(d_csrRowOffsets); d_csrRowOffsets = nullptr; }
@@ -74,13 +68,6 @@ namespace polysolve::linear {
         m_ncols = A.cols();
         m_nnz   = A.nonZeros();
 
-        // Persist dimensions in host memory
-        h_nrows = { m_nrows };
-        h_ncols = { m_ncols };
-        h_nnz   = { m_nnz };
-        h_vec_ncols = { 1 };
-        h_ld    = { m_nrows };
-
         // Allocate Device Memory for Matrix A
         CHECK_CUDA(cudaMalloc(&d_csrRowOffsets, (m_nrows + 1) * sizeof(int)));
         CHECK_CUDA(cudaMalloc(&d_csrColIndices, m_nnz * sizeof(int)));
@@ -90,25 +77,10 @@ namespace polysolve::linear {
         CHECK_CUDA(cudaMemcpy(d_csrRowOffsets, A.outerIndexPtr(), (m_nrows + 1) * sizeof(int), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(d_csrColIndices, A.innerIndexPtr(), m_nnz * sizeof(int), cudaMemcpyHostToDevice));
         
-        // Create Pointer Arrays on Host
-        std::vector<void*> h_csrRowOffsets_void = { static_cast<void*>(d_csrRowOffsets) };
-        std::vector<void*> h_csrColIndices_void = { static_cast<void*>(d_csrColIndices) };
-        std::vector<void*> h_csrValues_void     = { static_cast<void*>(d_csrValues) };
-
-        // Allocate Pointer Arrays on GPU
-        CHECK_CUDA(cudaMalloc(&d_csrRowOffsets_void, m_batchCount * sizeof(void*)));
-        CHECK_CUDA(cudaMalloc(&d_csrColIndices_void, m_batchCount * sizeof(void*)));
-        CHECK_CUDA(cudaMalloc(&d_csrValues_void, m_batchCount * sizeof(void*)));
-
-        // Copy Pointer Arrays to GPU
-        CHECK_CUDA(cudaMemcpy(d_csrRowOffsets_void, h_csrRowOffsets_void.data(), m_batchCount * sizeof(void*), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_csrColIndices_void, h_csrColIndices_void.data(), m_batchCount * sizeof(void*), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_csrValues_void, h_csrValues_void.data(), m_batchCount * sizeof(void*), cudaMemcpyHostToDevice));
-
         // Create Matrix Descriptor
-        CHECK_CUDSS(cudssMatrixCreateBatchCsr(
-            &batchMatrixA, m_batchCount, h_nrows.data(), h_ncols.data(), h_nnz.data(), 
-            d_csrRowOffsets_void, nullptr, d_csrColIndices_void, d_csrValues_void, 
+        CHECK_CUDSS(cudssMatrixCreateCsr(
+            &MatrixA, m_nrows, m_ncols, m_nnz, 
+            d_csrRowOffsets, nullptr, d_csrColIndices, d_csrValues, 
             CUDA_R_32I, CUDA_R_64F, CUDSS_MTYPE_SYMMETRIC, 
             CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO
         ));
@@ -120,10 +92,18 @@ namespace polysolve::linear {
         {
             POLYSOLVE_SCOPED_STOPWATCH("actual pattern analysis time", pattern_analysis_time, *logger);
 
-            // Execute Analysis Phase (X and B can be nullptr during analysis)
-            CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_ANALYSIS, config, solverData, 
-                                    batchMatrixA, nullptr, nullptr));
-            CHECK_CUDA(cudaDeviceSynchronize());
+            {
+                POLYSOLVE_SCOPED_STOPWATCH("actual reordering time", reordering_time, *logger);
+                CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_REORDERING, config, solverData, 
+                                   MatrixA, nullptr, nullptr));
+                CHECK_CUDA(cudaDeviceSynchronize());
+            }
+            {
+                POLYSOLVE_SCOPED_STOPWATCH("actual symbolic factorization time", symbolic_time, *logger);
+                CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_SYMBOLIC_FACTORIZATION, config, solverData, 
+                                    MatrixA, nullptr, nullptr));
+                CHECK_CUDA(cudaDeviceSynchronize());
+            }
         }
     }
 
@@ -134,7 +114,7 @@ namespace polysolve::linear {
 
         // Execute Factorization Phase
         CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_FACTORIZATION, config, solverData, 
-                                batchMatrixA, nullptr, nullptr));
+                                MatrixA, nullptr, nullptr));
         CHECK_CUDA(cudaDeviceSynchronize());
     }
 
@@ -144,35 +124,26 @@ namespace polysolve::linear {
             CHECK_CUDA(cudaMalloc(&d_x, m_nrows * sizeof(double)));
             CHECK_CUDA(cudaMalloc(&d_b, m_nrows * sizeof(double)));
 
-            std::vector<void*> h_x_void = { static_cast<void*>(d_x) };
-            std::vector<void*> h_b_void = { static_cast<void*>(d_b) };
-
-            CHECK_CUDA(cudaMalloc(&d_x_void, m_batchCount * sizeof(void*)));
-            CHECK_CUDA(cudaMalloc(&d_b_void, m_batchCount * sizeof(void*)));
-
-            CHECK_CUDA(cudaMemcpy(d_x_void, h_x_void.data(), m_batchCount * sizeof(void*), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_b_void, h_b_void.data(), m_batchCount * sizeof(void*), cudaMemcpyHostToDevice));
-
-            CHECK_CUDSS(cudssMatrixCreateBatchDn(
-                &batchMatrixX, m_batchCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), 
-                d_x_void, CUDA_R_32I, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
+            CHECK_CUDSS(cudssMatrixCreateDn(
+                &MatrixX, m_nrows, 1, m_nrows, 
+                d_x, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
             ));
 
-            CHECK_CUDSS(cudssMatrixCreateBatchDn(
-                &batchMatrixB, m_batchCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), 
-                d_b_void, CUDA_R_32I, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
+            CHECK_CUDSS(cudssMatrixCreateDn(
+                &MatrixB, m_nrows, 1, m_nrows, 
+                d_b, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
             ));
         }
 
         // Transfer Inputs to GPU
         CHECK_CUDA(cudaMemcpy(d_b, b.data(), m_nrows * sizeof(double), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_x, x.data(), m_nrows * sizeof(double), cudaMemcpyHostToDevice)); // Optional: Copy initial guess
+        CHECK_CUDA(cudaMemcpy(d_x, x.data(), m_nrows * sizeof(double), cudaMemcpyHostToDevice));
 
         {
             POLYSOLVE_SCOPED_STOPWATCH("actual solve time", solve_time, *logger);
             // Execute Solve Phase
             CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, config, solverData, 
-                                    batchMatrixA, batchMatrixX, batchMatrixB));
+                                    MatrixA, MatrixX, MatrixB));
             CHECK_CUDA(cudaDeviceSynchronize());
         }
 
