@@ -7,6 +7,9 @@
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <thrust/device_ptr.h>
+#include <thrust/for_each.h>
+#include <thrust/iterator/counting_iterator.h>
 #include <thrust/sort.h>
 #include <thrust/sequence.h>
 #include <thrust/transform.h>
@@ -17,9 +20,12 @@
 #include <thrust/scatter.h>
 
 #include <iostream>
+#include <fstream>
 
 #include <mpi.h>
 #include <metis.h>
+
+#include <omp.h>
 
 
 #define CHECK_CUDA(call) \
@@ -681,24 +687,6 @@ namespace polysolve::linear
         }
     }
 
-    void GPUHybridSolver::build_index_mappings()
-    {
-        index_mappings.clear();
-        index_mappings.resize(bad_indices_.size());
-
-        int i_counter = 0;
-        for (int i = 0; i < bad_indices_.size(); ++i)
-        {
-            int j_counter = 0;
-            for (auto j : bad_indices_arrays[i])
-            {
-                index_mappings[i_counter][j] = j_counter;
-                ++j_counter;
-            }
-            ++i_counter;
-        }
-    }
-
     void GPUHybridSolver::select_bad_indices()
     {
         POLYSOLVE_SCOPED_STOPWATCH("bad dof selection time", bad_dof_selection_time, *logger);
@@ -715,7 +703,7 @@ namespace polysolve::linear
         if (n == 0) return; 
 
         thrust::device_vector<double> d_sq_mags(sq_mags.data(), sq_mags.data() + n);
-        
+
         thrust::device_vector<int> d_indices(n);
         thrust::sequence(d_indices.begin(), d_indices.end());
 
@@ -769,7 +757,6 @@ namespace polysolve::linear
         int batchCount = bad_indices_arrays.size();
         if (batchCount == 0) return;
 
-        build_index_mappings();
         free_device_memory();
 
         CHECK_CUDSS(cudssConfigCreate(&config));
@@ -781,68 +768,136 @@ namespace polysolve::linear
         h_vec_ncols.clear();
         h_ld.clear();
 
+        h_nrows.resize(batchCount);
+        h_ncols.resize(batchCount);
+        h_nnz.resize(batchCount);
+        h_vec_ncols.resize(batchCount, 1);
+        h_ld.resize(batchCount);
+
         h_csrRowOffsets_void.clear();
         h_csrColIndices_void.clear();
         h_csrValues_void.clear();
 
-        int total_bad_dofs = 0;
+        h_csrRowOffsets_void.resize(batchCount);
+        h_csrColIndices_void.resize(batchCount);
+        h_csrValues_void.resize(batchCount);
+
+        std::vector<int> h_bad_offsets(batchCount + 1, 0);
         all_bad_dof_map.clear();
+        int total_bad_dofs = 0;
 
-        for (auto &ba : bad_indices_arrays)
+        for (int i = 0; i < batchCount; ++i) 
         {
-            total_bad_dofs += ba.size();
-        }
-        all_bad_dof_map.reserve(total_bad_dofs);
-        logger->trace("Total bad dofs: {}", total_bad_dofs);
-        for (auto &ba : bad_indices_arrays)
-        {
+            auto& ba = bad_indices_arrays[i];
             all_bad_dof_map.insert(all_bad_dof_map.end(), ba.begin(), ba.end());
+            
+            h_nrows[i] = ba.size();
+            h_ncols[i] = ba.size();
+            h_ld[i]    = ba.size();
+            
+            total_bad_dofs += ba.size();
+            h_bad_offsets[i + 1] = total_bad_dofs;
         }
+        logger->trace("Total bad dofs: {}", total_bad_dofs);
 
-        std::vector<Eigen::SparseMatrix<double, Eigen::RowMajor>> cpu_matrices(batchCount);
+        // --- UPLOAD GLOBAL SPARSE MATRIX TO DEVICE ---
+        int* d_outer_ptrs;
+        int* d_inner_indices;
+        double* d_values;
+        int sparse_A_rows = sparse_A.rows();
+        int sparse_A_nnz = sparse_A.nonZeros();
         
-        int total_row_offsets = 0; // sum of (nrows + 1)
-        int total_nnz = 0;         // sum of non-zeros
+        CHECK_CUDA(cudaMalloc(&d_outer_ptrs, (sparse_A_rows + 1) * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_inner_indices, sparse_A_nnz * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_values, sparse_A_nnz * sizeof(double)));
+        
+        CHECK_CUDA(cudaMemcpy(d_outer_ptrs, sparse_A.outerIndexPtr(), (sparse_A_rows + 1) * sizeof(int), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_inner_indices, sparse_A.innerIndexPtr(), sparse_A_nnz * sizeof(int), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_values, sparse_A.valuePtr(), sparse_A_nnz * sizeof(double), cudaMemcpyHostToDevice));
 
-        for (int i = 0; i < batchCount; ++i)
-        {
-            assemble_D(i, i, cpu_matrices[i]); 
+        // --- ALLOCATE TEMPORARY DEVICE METADATA ---
+        int* d_bad_indices;
+        int* d_bad_offsets;
+        int* d_nnz_per_row;
+        int* d_value_offsets;
 
-            int m_nrows = cpu_matrices[i].rows();
-            int m_ncols = cpu_matrices[i].cols();
-            int m_nnz   = cpu_matrices[i].nonZeros();
+        CHECK_CUDA(cudaMalloc(&d_bad_indices, total_bad_dofs * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_bad_offsets, (batchCount + 1) * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_nnz_per_row, total_bad_dofs * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_value_offsets, (total_bad_dofs + 1) * sizeof(int)));
 
-            h_nrows.push_back(m_nrows);
-            h_ncols.push_back(m_ncols);
-            h_nnz.push_back(m_nnz);
-            h_vec_ncols.push_back(1);
-            h_ld.push_back(m_nrows);
+        CHECK_CUDA(cudaMemcpy(d_bad_indices, all_bad_dof_map.data().get(), total_bad_dofs * sizeof(int), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_bad_offsets, h_bad_offsets.data(), (batchCount + 1) * sizeof(int), cudaMemcpyHostToDevice));
 
-            total_row_offsets += (m_nrows + 1);
-            total_nnz += m_nnz;
+        // --- PASS 1: COUNT NNZ PER ROW ---
+        thrust::for_each(thrust::device,
+            thrust::make_counting_iterator<int>(0),
+            thrust::make_counting_iterator<int>(total_bad_dofs),
+            [=] __device__ (int tid) {
+                int l = 0, r = batchCount - 1;
+                int batch_id = 0;
+                while (l <= r) {
+                    int m = l + (r - l) / 2;
+                    if (d_bad_offsets[m] <= tid && tid < d_bad_offsets[m + 1]) {
+                        batch_id = m; break;
+                    } else if (d_bad_offsets[m] > tid) r = m - 1;
+                    else l = m + 1;
+                }
+
+                int batch_start = d_bad_offsets[batch_id];
+                int batch_end = d_bad_offsets[batch_id + 1];
+                int global_row = d_bad_indices[tid];
+
+                int ptr_start = d_outer_ptrs[global_row];
+                int ptr_end = d_outer_ptrs[global_row + 1];
+
+                int count = 0;
+                for (int p = ptr_start; p < ptr_end; ++p) {
+                    int g_col = d_inner_indices[p];
+                    int cl = batch_start, cr = batch_end - 1;
+                    while (cl <= cr) {
+                        int cm = cl + (cr - cl) / 2;
+                        if (d_bad_indices[cm] == g_col) { count++; break; }
+                        if (d_bad_indices[cm] < g_col) cl = cm + 1;
+                        else cr = cm - 1;
+                    }
+                }
+                d_nnz_per_row[tid] = count;
+            }
+        );
+
+        // Prefix sum (exclusive scan)
+        thrust::device_ptr<int> t_nnz_per_row(d_nnz_per_row);
+        thrust::device_ptr<int> t_value_offsets(d_value_offsets);
+        thrust::exclusive_scan(thrust::device, t_nnz_per_row, t_nnz_per_row + total_bad_dofs + 1, t_value_offsets);
+
+        // --- FETCH METADATA AND COMPUTE OFFSETS ---
+        std::vector<int> h_value_offsets(batchCount + 1);
+        for(int i = 0; i <= batchCount; ++i) {
+            CHECK_CUDA(cudaMemcpy(&h_value_offsets[i], d_value_offsets + h_bad_offsets[i], sizeof(int), cudaMemcpyDeviceToHost));
         }
 
-        std::vector<int> h_all_rowOffsets(total_row_offsets);
-        std::vector<int> h_all_colIndices(total_nnz);
-        std::vector<double> h_all_values(total_nnz);
+        int total_nnz = h_value_offsets[batchCount];
+        int total_row_offsets = total_bad_dofs + batchCount;
 
-        int offset_rows = 0;
-        int offset_nnz = 0;
+        std::vector<int> row_starts(batchCount);
+        std::vector<int> nnz_starts(batchCount);
+        std::vector<int> dof_starts(batchCount);
 
-        for (int i = 0; i < batchCount; ++i)
-        {
-            const auto& D = cpu_matrices[i];
-            int current_rows = D.rows();
-            int current_nnz = D.nonZeros();
-
-            std::memcpy(&h_all_rowOffsets[offset_rows], D.outerIndexPtr(), (current_rows + 1) * sizeof(int));
-            std::memcpy(&h_all_colIndices[offset_nnz], D.innerIndexPtr(), current_nnz * sizeof(int));
-            std::memcpy(&h_all_values[offset_nnz], D.valuePtr(), current_nnz * sizeof(double));
-
-            offset_rows += (current_rows + 1);
-            offset_nnz += current_nnz;
+        int running_row_offsets = 0;
+        int running_dofs = 0;
+        for (int i = 0; i < batchCount; ++i) {
+            row_starts[i] = running_row_offsets;
+            nnz_starts[i] = h_value_offsets[i]; 
+            dof_starts[i] = running_dofs;
+            
+            h_nnz[i] = h_value_offsets[i+1] - h_value_offsets[i];
+            
+            running_row_offsets += h_nrows[i] + 1;
+            running_dofs += h_nrows[i];
         }
 
+        // --- PASS 2: ALLOCATE AND FILL CSR ---
         int* d_all_rowOffsets;
         int* d_all_colIndices;
         double* d_all_values;
@@ -851,24 +906,61 @@ namespace polysolve::linear
         CHECK_CUDA(cudaMalloc(&d_all_colIndices, total_nnz * sizeof(int)));
         CHECK_CUDA(cudaMalloc(&d_all_values, total_nnz * sizeof(double)));
 
-        CHECK_CUDA(cudaMemcpy(d_all_rowOffsets, h_all_rowOffsets.data(), total_row_offsets * sizeof(int), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_all_colIndices, h_all_colIndices.data(), total_nnz * sizeof(int), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_all_values, h_all_values.data(), total_nnz * sizeof(double), cudaMemcpyHostToDevice));
+        thrust::for_each(thrust::device,
+            thrust::make_counting_iterator<int>(0),
+            thrust::make_counting_iterator<int>(total_bad_dofs),
+            [=] __device__ (int tid) {
+                int l = 0, r = batchCount - 1;
+                int batch_id = 0;
+                while (l <= r) {
+                    int m = l + (r - l) / 2;
+                    if (d_bad_offsets[m] <= tid && tid < d_bad_offsets[m + 1]) {
+                        batch_id = m; break;
+                    } else if (d_bad_offsets[m] > tid) r = m - 1;
+                    else l = m + 1;
+                }
 
-        offset_rows = 0;
-        offset_nnz = 0;
+                int batch_start = d_bad_offsets[batch_id];
+                int batch_end = d_bad_offsets[batch_id + 1];
+                int local_row = tid - batch_start;
+                int global_row = d_bad_indices[tid];
 
+                int write_ptr = d_value_offsets[tid];
+                int batch_nnz_start = d_value_offsets[batch_start];
+                
+                d_all_rowOffsets[batch_id + tid] = write_ptr - batch_nnz_start;
+
+                if (local_row == (batch_end - batch_start - 1)) {
+                    d_all_rowOffsets[batch_id + tid + 1] = d_value_offsets[batch_end] - batch_nnz_start;
+                }
+
+                int ptr_start = d_outer_ptrs[global_row];
+                int ptr_end = d_outer_ptrs[global_row + 1];
+
+                for (int p = ptr_start; p < ptr_end; ++p) {
+                    int g_col = d_inner_indices[p];
+                    int cl = batch_start, cr = batch_end - 1;
+                    while (cl <= cr) {
+                        int cm = cl + (cr - cl) / 2;
+                        if (d_bad_indices[cm] == g_col) {
+                            d_all_colIndices[write_ptr] = cm - batch_start; 
+                            d_all_values[write_ptr] = d_values[p];
+                            write_ptr++;
+                            break;
+                        }
+                        if (d_bad_indices[cm] < g_col) cl = cm + 1;
+                        else cr = cm - 1;
+                    }
+                }
+            }
+        );
+
+        // --- LINK UP CUDSS POINTERS ---
         for (int i = 0; i < batchCount; ++i)
         {
-            int current_rows = h_nrows[i];
-            int current_nnz = h_nnz[i];
-
-            h_csrRowOffsets_void.push_back(static_cast<void*>(d_all_rowOffsets + offset_rows));
-            h_csrColIndices_void.push_back(static_cast<void*>(d_all_colIndices + offset_nnz));
-            h_csrValues_void.push_back(static_cast<void*>(d_all_values + offset_nnz));
-
-            offset_rows += (current_rows + 1);
-            offset_nnz += current_nnz;
+            h_csrRowOffsets_void[i] = static_cast<void*>(d_all_rowOffsets + row_starts[i]);
+            h_csrColIndices_void[i] = static_cast<void*>(d_all_colIndices + nnz_starts[i]);
+            h_csrValues_void[i] = static_cast<void*>(d_all_values + nnz_starts[i]);
         }
 
         CHECK_CUDA(cudaMalloc(&d_csrRowOffsets_void, batchCount * sizeof(void*)));
@@ -878,13 +970,13 @@ namespace polysolve::linear
         CHECK_CUDA(cudaMalloc(&d_x, total_bad_dofs * sizeof(double)));
         CHECK_CUDA(cudaMalloc(&d_b, total_bad_dofs * sizeof(double)));
 
-        h_x_void.push_back(static_cast<void*>(d_x));
-        h_b_void.push_back(static_cast<void*>(d_b));
+        h_x_void.clear();
+        h_b_void.clear();
 
-        for (int i = 1; i < h_nrows.size(); ++i)
+        for (int i = 0; i < batchCount; ++i)
         {
-            h_x_void.push_back(static_cast<void*>(h_x_void.back() + h_nrows[i - 1] * sizeof(double)));
-            h_b_void.push_back(static_cast<void*>(h_b_void.back() + h_nrows[i - 1] * sizeof(double)));
+            h_x_void.push_back(static_cast<void*>(d_x + dof_starts[i]));
+            h_b_void.push_back(static_cast<void*>(d_b + dof_starts[i]));
         }
 
         CHECK_CUDA(cudaMalloc(&d_x_void, batchCount * sizeof(void*)));
@@ -897,6 +989,7 @@ namespace polysolve::linear
         CHECK_CUDA(cudaMemcpy(d_x_void, h_x_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(d_b_void, h_b_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
 
+        // --- CUDSS EXECUTION ---
         CHECK_CUDSS(cudssMatrixCreateBatchDn(
             &batchMatrixX, batchCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), 
             d_x_void, CUDA_R_32I, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
@@ -923,28 +1016,15 @@ namespace polysolve::linear
                                 batchMatrixA, nullptr, nullptr));
             CHECK_CUDA(cudaDeviceSynchronize());
         }
-    }
 
-    void GPUHybridSolver::assemble_D(int bad_i, int i, Eigen::SparseMatrix<double, Eigen::RowMajor>& D)
-    {
-        D.resize(bad_indices_arrays[i].size(), bad_indices_arrays[i].size());
-        std::vector<Eigen::Triplet<double>> triplets;
-        for (int k : bad_indices_arrays[i])
-        {
-            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sparse_A, k); it; ++it)
-            {
-                auto ind_it = index_mappings[bad_i].find(it.col());
-                if (ind_it != index_mappings[bad_i].end())
-                {
-                    triplets.push_back(Eigen::Triplet<double>(index_mappings[bad_i][it.row()], index_mappings[bad_i][it.col()], it.value()));
-                }
-            }
-        }
-
-        {
-            //POLYSOLVE_SCOPED_STOPWATCH("set D from triplets", set_from_triplets_time, *logger);
-            D.setFromTriplets(triplets.begin(), triplets.end());
-        }
+        // --- CLEANUP ---
+        cudaFree(d_bad_indices);
+        cudaFree(d_bad_offsets);
+        cudaFree(d_nnz_per_row);
+        cudaFree(d_value_offsets);
+        cudaFree(d_outer_ptrs);
+        cudaFree(d_inner_indices);
+        cudaFree(d_values);
     }
 
     void GPUHybridSolver::pcg_solve(double* rhs, double* result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond)
@@ -988,6 +1068,11 @@ namespace polysolve::linear
                 CHECK_CUDA(cudaMemset(result, 0, sparse_A.rows() * sizeof(double)));
                 num_iterations = 0;
                 final_res_norm = 0;
+                CHECK_CUDA(cudaFree(r));
+                CHECK_CUDA(cudaFree(p));
+                CHECK_CUDA(cudaFree(z));
+                CHECK_CUDA(cudaFree(z2));
+                CHECK_CUDA(cudaFree(buffer));
                 return;
             }
 
@@ -1072,6 +1157,11 @@ namespace polysolve::linear
             vector_scale(beta, p);
             vector_add(1.0, z, p);
         }
+        CHECK_CUDA(cudaFree(r));
+        CHECK_CUDA(cudaFree(p));
+        CHECK_CUDA(cudaFree(z));
+        CHECK_CUDA(cudaFree(z2));
+        CHECK_CUDA(cudaFree(buffer));
     }
 
     GPUHybridSolver::~GPUHybridSolver()

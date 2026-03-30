@@ -99,7 +99,6 @@ namespace polysolve::linear
 
         // hybrid preconditioner data
         std::vector<thrust::device_vector<int>> bad_indices_arrays;
-        std::vector<std::unordered_map<int, int>> index_mappings;
         thrust::device_vector<int> all_bad_dof_map;
 
         // cudss data
@@ -139,9 +138,9 @@ namespace polysolve::linear
         double* d_x = nullptr;
         double* d_b = nullptr;
 
-        int* d_all_rowOffsets;
-        int* d_all_colIndices;
-        double* d_all_values;
+        int* d_all_rowOffsets = nullptr;
+        int* d_all_colIndices = nullptr;
+        double* d_all_values = nullptr;
 
         // Device memory pointers (Arrays of pointers for cuDSS Batch API)
         void **d_csrRowOffsets_void = nullptr;
@@ -197,7 +196,6 @@ namespace polysolve::linear
         void prepare_dss();
         void decompose_subdomains_to_disjoint_subsets(std::vector<std::set<int>> &overlap_extensions);
         void partition_subdomain(std::vector<int>& subdomain, std::vector<std::set<int>> &overlap_extensions);
-        void build_index_mappings();
         void select_bad_indices();
         void factorize_submatrix();
         void assemble_D(int bad_i, int i, Eigen::SparseMatrix<double, Eigen::RowMajor>& D);
