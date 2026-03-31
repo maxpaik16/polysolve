@@ -16,7 +16,8 @@
             "Pardiso",
             "Hypre",
             "AMGCL",
-            "Experimental"
+            "Experimental",
+            "GPUHybridSolver"
         ],
         "doc": "Settings for the linear solver."
     },
@@ -43,6 +44,7 @@
             "Pardiso",
             "Hypre",
             "Experimental",
+            "GPUHybridSolver",
             "AMGCL",
             "Eigen::LeastSquaresConjugateGradient",
             "Eigen::DGMRES",
@@ -739,5 +741,118 @@
         "default": 1.0,
         "type": "float",
         "doc": "Damping factor for Jacobi preconditioning."
-    }                                    
+    },
+    {
+        "pointer": "/GPUHybridSolver",
+        "default": null,
+        "type": "object",
+        "optional": [
+            "max_iter",
+            "tolerance",
+            "theta",
+            "dimension",
+            "do_mixed_precond",
+            "use_absolute_tol",
+            "bad_dof_threshold",
+            "max_bad_dof_threshold",
+            "adapt_bad_dof_threshold",
+            "bad_dof_threshold_inc_factor",
+            "adaptive_max_iters",
+            "decompose_subdomains",
+            "min_subdomain_size",
+            "max_subdomain_size",
+            "find_threshold_from_secant"
+        ],
+        "doc": "Settings for the GPUHybridSolver."
+    },
+        {
+        "pointer": "/GPUHybridSolver/max_iter",
+        "default": 1000,
+        "type": "int",
+        "doc": "Maximum number of iterations."
+    },
+    {
+        "pointer": "/GPUHybridSolver/tolerance",
+        "default": 1e-10,
+        "type": "float",
+        "doc": "Convergence tolerance."
+    },
+    {
+        "pointer": "/GPUHybridSolver/theta",
+        "default": 0.5,
+        "type": "float",
+        "doc": "Strong threshold."
+    },
+    {
+        "pointer": "/GPUHybridSolver/dimension",
+        "default": 1,
+        "type": "int",
+        "doc": "Dimension of problem."
+    },
+    {
+        "pointer": "/GPUHybridSolver/do_mixed_precond",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to use mixed preconditioner with direct subsolve."
+    },
+    {
+        "pointer": "/GPUHybridSolver/use_absolute_tol",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to use absolute residual tolerance to check convergence."
+    },
+    {
+        "pointer": "/GPUHybridSolver/bad_dof_threshold",
+        "default": 0.1,
+        "type": "float",
+        "doc": "What percentile to use as a cutoff for marking a node as problematic (between 0 and 1)."
+    },
+    {
+        "pointer": "/GPUHybridSolver/max_bad_dof_threshold",
+        "default": 0.5,
+        "type": "float",
+        "doc": "Maximum percentile to use as a cutoff for marking a node as problematic (between 0 and 1)."
+    },
+    {
+        "pointer": "/GPUHybridSolver/bad_dof_threshold_inc_factor",
+        "default": 1.1,
+        "type": "float",
+        "doc": "How much to increase the bad dof threshold by if a solve fails and adaptivity is turned on."
+    },
+    {
+        "pointer": "/GPUHybridSolver/adapt_bad_dof_threshold",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to use adaptively select size of problematic subspace."
+    },
+    {
+        "pointer": "/GPUHybridSolver/adaptive_max_iters",
+        "default": 100,
+        "type": "int",
+        "doc": "Maximum number of iterations to try before attempting a larger problematic subspace."
+    },
+    {
+        "pointer": "/GPUHybridSolver/decompose_subdomains",
+        "default": false,
+        "type": "bool",
+        "doc": "Decompose subdomains for preconditioner."
+    },
+    {
+        "pointer": "/GPUHybridSolver/min_subdomain_size",
+        "default": 1,
+        "type": "int",
+        "doc": "Minimum size of subdomain for preconditioner."
+    },
+    {
+        "pointer": "/GPUHybridSolver/max_subdomain_size",
+        "default": 1000000000,
+        "type": "int",
+        "doc": "Maximum size of subdomain for preconditioner (soft constraint)."
+    },
+    {
+        "pointer": "/GPUHybridSolver/find_threshold_from_secant",
+        "default": false,
+        "type": "bool",
+        "doc": "If true, find threshold from secant line."
+    }                   
 ]
