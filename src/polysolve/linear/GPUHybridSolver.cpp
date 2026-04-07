@@ -506,7 +506,7 @@ namespace polysolve::linear
         int i = 0;
         for (auto& subdomain : bad_indices_)
         {
-            logger->trace("Subdomain size: {}", subdomain.size() + overlap_extensions[i].size());
+            //logger->trace("Subdomain size: {}", subdomain.size() + overlap_extensions[i].size());
             std::vector<int> cpu_buff(subdomain.begin(), subdomain.end());
             bad_indices_arrays.emplace_back(cpu_buff.begin(), cpu_buff.end());
             ++i;
@@ -895,6 +895,7 @@ namespace polysolve::linear
             
             running_row_offsets += h_nrows[i] + 1;
             running_dofs += h_nrows[i];
+            logger->trace("Subdomain size: {}, NNZ: {}, Fill: {}", h_nrows[i], h_nnz[i], static_cast<double>(h_nnz[i]) / (h_nrows[i] * h_nrows[i]));
         }
 
         // --- PASS 2: ALLOCATE AND FILL CSR ---
