@@ -17,7 +17,6 @@
 
 #include <cudss.h>
 #include <thrust/device_vector.h>
-#include <magma_v2.h>
 
 extern "C" {
     HYPRE_Int hypre_ParVectorAxpy(HYPRE_Complex alpha, HYPRE_ParVector x, HYPRE_ParVector y);
@@ -149,24 +148,6 @@ namespace polysolve::linear
         void **d_csrValues_void = nullptr;
         void **d_x_void = nullptr;
         void **d_b_void = nullptr;
-
-        // Device memory pointers for magma batch dense solve
-        magma_int_t* d_dense_n;
-        double** d_dense_A;
-        double** d_dense_X;
-        magma_int_t** d_dense_ipiv;
-        magma_int_t* d_dense_info;
-        magma_int_t* d_dense_ones;
-
-        int sparseCount = 0;
-        int denseCount = 0;
-        int total_sparse_dofs = 0;
-        int total_dense_dofs = 0;
-
-        magma_queue_t magma_queue;
-
-        int dense_size_threshold = 1000; // threshold for deciding when to use dense vs sparse solve in DSS
-        double dense_sparsity_threshold = 0.1; // threshold for deciding when to treat a submatrix as dense based on sparsity
 
         // timing variables
         double copy_b_and_x_time;

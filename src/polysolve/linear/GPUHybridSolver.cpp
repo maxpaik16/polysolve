@@ -62,9 +62,6 @@ namespace polysolve::linear
         HYPRE_SetUseGpuRand(true);
 
         CHECK_CUDSS(cudssCreate(&cudss_handle));
-
-        magma_init();
-        magma_queue_create(0, &magma_queue);
     }
 
     void GPUHybridSolver::set_parameters(const json &params)
@@ -110,14 +107,6 @@ namespace polysolve::linear
             if (params["GPUHybridSolver"].contains("bad_dof_threshold"))
             {
                 bad_dof_threshold = params["GPUHybridSolver"]["bad_dof_threshold"];
-            }
-            if (params["GPUHybridSolver"].contains("dense_size_threshold"))
-            {
-                dense_size_threshold = params["GPUHybridSolver"]["dense_size_threshold"];
-            }
-            if (params["GPUHybridSolver"].contains("dense_sparsity_threshold"))
-            {
-                dense_sparsity_threshold = params["GPUHybridSolver"]["dense_sparsity_threshold"];
             }
         }
     } 
@@ -438,11 +427,12 @@ namespace polysolve::linear
             amg_precond_iter(precond, buffer, z);
             vector_add(1.0, z2, z);
         }
+
     }
 
     void GPUHybridSolver::dss_precond_iter(double* z, double* r, double* next_z)
     {
-        {
+       {
             POLYSOLVE_SCOPED_STOPWATCH("dss step time: ", dss_step_time, *logger);
 
             CHECK_CUDA(cudaMemset(next_z, 0, sparse_A.rows() * sizeof(double)));
@@ -451,8 +441,6 @@ namespace polysolve::linear
             vector_scale(-1.0, next_z);
             vector_add(1.0, r, next_z);
 
-            // Gather RHS for both Sparse and Dense systems simultaneously.
-            // This works because all_bad_dof_map is now ordered (Sparse DOFs -> Dense DOFs)
             thrust::gather(
                 thrust::device,
                 all_bad_dof_map.begin(), 
@@ -465,81 +453,13 @@ namespace polysolve::linear
             double test_time;
             {
                 POLYSOLVE_SCOPED_STOPWATCH("dss backsub time: ", test_time, *logger);
-
-                // ---------------------------------------------------------
-                // 1. cuDSS SOLVE (SPARSE)
-                // ---------------------------------------------------------
-                if (sparseCount > 0) 
-                {
-                    CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, config, solverData, 
-                                            batchMatrixA, batchMatrixX, batchMatrixB));
-                }
-
-                // ---------------------------------------------------------
-                // 2. MAGMA SOLVE (DENSE)
-                // ---------------------------------------------------------
-                if (denseCount > 0)
-                {
-                    CHECK_CUDA(cudaMemcpy(
-                        d_x + total_sparse_dofs,      
-                        d_b + total_sparse_dofs,      
-                        total_dense_dofs * sizeof(double), 
-                        cudaMemcpyDeviceToDevice
-                    ));
-
-                    // 1. Apply Pivots (P * b) via inline device lambda
-                    // Map class members to local variables to safely capture them in device code
-                    magma_int_t* local_d_n = d_dense_n;
-                    magma_int_t** local_d_ipiv = d_dense_ipiv;
-                    double** local_d_X = d_dense_X;
-
-                    thrust::for_each(thrust::device, 
-                        thrust::make_counting_iterator<int>(0), 
-                        thrust::make_counting_iterator<int>(denseCount),
-                        [=] __device__ (int batch_id) {
-                            int n = local_d_n[batch_id];
-                            magma_int_t* ipiv = local_d_ipiv[batch_id];
-                            double* x = local_d_X[batch_id];
-                            
-                            // Apply permutations sequentially (1-based to 0-based indexing)
-                            for (int i = 0; i < n; ++i) {
-                                int piv = ipiv[i] - 1; 
-                                if (piv != i) {
-                                    double tmp = x[i];
-                                    x[i] = x[piv];
-                                    x[piv] = tmp;
-                                }
-                            }
-                        }
-                    );
-
-                    // 2. Forward Solve: L * y = (P * b)
-                    magmablas_dtrsm_vbatched(
-                        MagmaLeft, MagmaLower, MagmaNoTrans, MagmaUnit,         
-                        d_dense_n, d_dense_ones,    
-                        1.0,                        
-                        d_dense_A, d_dense_n,       
-                        d_dense_X, d_dense_n,       
-                        denseCount, magma_queue
-                    );
-
-                    // 3. Backward Solve: U * x = y
-                    magmablas_dtrsm_vbatched(
-                        MagmaLeft, MagmaUpper, MagmaNoTrans, MagmaNonUnit,
-                        d_dense_n, d_dense_ones, 
-                        1.0, 
-                        d_dense_A, d_dense_n, 
-                        d_dense_X, d_dense_n, 
-                        denseCount, magma_queue
-                    );
-                }
-
+                CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, config, solverData, 
+                                        batchMatrixA, batchMatrixX, batchMatrixB));
                 CHECK_CUDA(cudaDeviceSynchronize());
             }
             
             CHECK_CUDA(cudaMemset(next_z, 0, sizeof(double) * sparse_A.rows()));
-
-            // Scatter the fully populated d_x back to the global domain
+    
             thrust::scatter(
                 thrust::device,
                 d_x,
@@ -586,7 +506,7 @@ namespace polysolve::linear
         int i = 0;
         for (auto& subdomain : bad_indices_)
         {
-            //logger->trace("Subdomain size: {}", subdomain.size());// + overlap_extensions[i].size());
+            logger->trace("Subdomain size: {}", subdomain.size() + overlap_extensions[i].size());
             std::vector<int> cpu_buff(subdomain.begin(), subdomain.end());
             bad_indices_arrays.emplace_back(cpu_buff.begin(), cpu_buff.end());
             ++i;
@@ -839,39 +759,46 @@ namespace polysolve::linear
 
         free_device_memory();
 
-        // ---------------------------------------------------------
-        // 1. PARTITION BATCHES: SPARSE (cuDSS) vs DENSE (MAGMA)
-        // ---------------------------------------------------------
-        struct BatchMeta {
-            int original_id;
-            int size;
-            int global_dof_offset;
-            const thrust::device_vector<int>* indices; 
-        };
+        CHECK_CUDSS(cudssConfigCreate(&config));
+        CHECK_CUDSS(cudssDataCreate(cudss_handle, &solverData));
 
-        std::vector<BatchMeta> sparse_meta;
-        std::vector<BatchMeta> dense_meta;
-        
+        h_nrows.clear();
+        h_ncols.clear();
+        h_nnz.clear();
+        h_vec_ncols.clear();
+        h_ld.clear();
+
+        h_nrows.resize(batchCount);
+        h_ncols.resize(batchCount);
+        h_nnz.resize(batchCount);
+        h_vec_ncols.resize(batchCount, 1);
+        h_ld.resize(batchCount);
+
+        h_csrRowOffsets_void.clear();
+        h_csrColIndices_void.clear();
+        h_csrValues_void.clear();
+
+        h_csrRowOffsets_void.resize(batchCount);
+        h_csrColIndices_void.resize(batchCount);
+        h_csrValues_void.resize(batchCount);
+
+        std::vector<int> h_bad_offsets(batchCount + 1, 0);
+        all_bad_dof_map.clear();
         int total_bad_dofs = 0;
-        for (int i = 0; i < batchCount; ++i) {
-            logger->trace("Batch {}: size {}", i, bad_indices_arrays[i].size());
+
+        for (int i = 0; i < batchCount; ++i) 
+        {
             auto& ba = bad_indices_arrays[i];
-            int size = ba.size();
-            if (size < dense_size_threshold) {
-                dense_meta.push_back(BatchMeta{i, size, total_bad_dofs, &ba});
-            } else {
-                sparse_meta.push_back(BatchMeta{i, size, total_bad_dofs, &ba});
-            }
-            total_bad_dofs += size;
+            all_bad_dof_map.insert(all_bad_dof_map.end(), ba.begin(), ba.end());
+            
+            h_nrows[i] = ba.size();
+            h_ncols[i] = ba.size();
+            h_ld[i]    = ba.size();
+            
+            total_bad_dofs += ba.size();
+            h_bad_offsets[i + 1] = total_bad_dofs;
         }
-
-        sparseCount = sparse_meta.size();
-        denseCount = dense_meta.size();
-        logger->trace("Total bad dofs: {} (Sparse batches: {}, Dense batches: {})", total_bad_dofs, sparseCount, denseCount);
-
-        // Allocate shared x and b global vectors
-        CHECK_CUDA(cudaMalloc(&d_x, total_bad_dofs * sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&d_b, total_bad_dofs * sizeof(double)));
+        logger->trace("Total bad dofs: {}", total_bad_dofs);
 
         // --- UPLOAD GLOBAL SPARSE MATRIX TO DEVICE ---
         int* d_outer_ptrs;
@@ -887,323 +814,217 @@ namespace polysolve::linear
         CHECK_CUDA(cudaMemcpy(d_outer_ptrs, sparse_A.outerIndexPtr(), (sparse_A_rows + 1) * sizeof(int), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(d_inner_indices, sparse_A.innerIndexPtr(), sparse_A_nnz * sizeof(int), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(d_values, sparse_A.valuePtr(), sparse_A_nnz * sizeof(double), cudaMemcpyHostToDevice));
-        all_bad_dof_map.clear();
-        // ---------------------------------------------------------
-        // 2. cuDSS PIPELINE (SPARSE)
-        // ---------------------------------------------------------
-        if (sparseCount > 0)
-        {
-            CHECK_CUDSS(cudssConfigCreate(&config));
-            CHECK_CUDSS(cudssDataCreate(cudss_handle, &solverData));
 
-            h_nrows.assign(sparseCount, 0);
-            h_ncols.assign(sparseCount, 0);
-            h_nnz.assign(sparseCount, 0);
-            h_vec_ncols.assign(sparseCount, 1);
-            h_ld.assign(sparseCount, 0);
-            
-            h_csrRowOffsets_void.resize(sparseCount);
-            h_csrColIndices_void.resize(sparseCount);
-            h_csrValues_void.resize(sparseCount);
-            h_x_void.clear();
-            h_b_void.clear();
+        // --- ALLOCATE TEMPORARY DEVICE METADATA ---
+        int* d_bad_indices;
+        int* d_bad_offsets;
+        int* d_nnz_per_row;
+        int* d_value_offsets;
 
-            std::vector<int> sparse_bad_dofs;
-            std::vector<int> h_bad_offsets(sparseCount + 1, 0);
-            
-            for (int i = 0; i < sparseCount; ++i) {
-                h_nrows[i] = sparse_meta[i].size;
-                h_ncols[i] = sparse_meta[i].size;
-                h_ld[i]    = sparse_meta[i].size;
-                
-                // Note: This triggers implicit device-to-host copies via Thrust
-                sparse_bad_dofs.insert(sparse_bad_dofs.end(), sparse_meta[i].indices->begin(), sparse_meta[i].indices->end());
-                h_bad_offsets[i + 1] = h_bad_offsets[i] + sparse_meta[i].size;
-                
-                // Assign pointers to the shared d_x and d_b using the global offset
-                h_x_void.push_back(static_cast<void*>(d_x + sparse_meta[i].global_dof_offset));
-                h_b_void.push_back(static_cast<void*>(d_b + sparse_meta[i].global_dof_offset));
-            }
-            
-            total_sparse_dofs = sparse_bad_dofs.size();
-            all_bad_dof_map.insert(all_bad_dof_map.end(), sparse_bad_dofs.begin(), sparse_bad_dofs.end());
+        CHECK_CUDA(cudaMalloc(&d_bad_indices, total_bad_dofs * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_bad_offsets, (batchCount + 1) * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_nnz_per_row, total_bad_dofs * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_value_offsets, (total_bad_dofs + 1) * sizeof(int)));
 
-            int *d_bad_indices, *d_bad_offsets, *d_nnz_per_row, *d_value_offsets;
-            CHECK_CUDA(cudaMalloc(&d_bad_indices, total_sparse_dofs * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_bad_offsets, (sparseCount + 1) * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_nnz_per_row, total_sparse_dofs * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_value_offsets, (total_sparse_dofs + 1) * sizeof(int)));
+        CHECK_CUDA(cudaMemcpy(d_bad_indices, all_bad_dof_map.data().get(), total_bad_dofs * sizeof(int), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_bad_offsets, h_bad_offsets.data(), (batchCount + 1) * sizeof(int), cudaMemcpyHostToDevice));
 
-            CHECK_CUDA(cudaMemcpy(d_bad_indices, sparse_bad_dofs.data(), total_sparse_dofs * sizeof(int), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_bad_offsets, h_bad_offsets.data(), (sparseCount + 1) * sizeof(int), cudaMemcpyHostToDevice));
-
-            // PASS 1: COUNT NNZ PER ROW
-            thrust::for_each(thrust::device, thrust::make_counting_iterator<int>(0), thrust::make_counting_iterator<int>(total_sparse_dofs),
-                [=] __device__ (int tid) {
-                    int l = 0, r = sparseCount - 1;
-                    int batch_id = 0;
-                    while (l <= r) {
-                        int m = l + (r - l) / 2;
-                        if (d_bad_offsets[m] <= tid && tid < d_bad_offsets[m + 1]) {
-                            batch_id = m; break;
-                        } else if (d_bad_offsets[m] > tid) r = m - 1;
-                        else l = m + 1;
-                    }
-                    int batch_start = d_bad_offsets[batch_id];
-                    int batch_end = d_bad_offsets[batch_id + 1];
-                    int global_row = d_bad_indices[tid];
-                    int ptr_start = d_outer_ptrs[global_row];
-                    int ptr_end = d_outer_ptrs[global_row + 1];
-
-                    int count = 0;
-                    for (int p = ptr_start; p < ptr_end; ++p) {
-                        int g_col = d_inner_indices[p];
-                        int cl = batch_start, cr = batch_end - 1;
-                        while (cl <= cr) {
-                            int cm = cl + (cr - cl) / 2;
-                            if (d_bad_indices[cm] == g_col) { count++; break; }
-                            if (d_bad_indices[cm] < g_col) cl = cm + 1;
-                            else cr = cm - 1;
-                        }
-                    }
-                    d_nnz_per_row[tid] = count;
+        // --- PASS 1: COUNT NNZ PER ROW ---
+        thrust::for_each(thrust::device,
+            thrust::make_counting_iterator<int>(0),
+            thrust::make_counting_iterator<int>(total_bad_dofs),
+            [=] __device__ (int tid) {
+                int l = 0, r = batchCount - 1;
+                int batch_id = 0;
+                while (l <= r) {
+                    int m = l + (r - l) / 2;
+                    if (d_bad_offsets[m] <= tid && tid < d_bad_offsets[m + 1]) {
+                        batch_id = m; break;
+                    } else if (d_bad_offsets[m] > tid) r = m - 1;
+                    else l = m + 1;
                 }
-            );
 
-            thrust::device_ptr<int> t_nnz_per_row(d_nnz_per_row);
-            thrust::device_ptr<int> t_value_offsets(d_value_offsets);
-            thrust::exclusive_scan(thrust::device, t_nnz_per_row, t_nnz_per_row + total_sparse_dofs + 1, t_value_offsets);
+                int batch_start = d_bad_offsets[batch_id];
+                int batch_end = d_bad_offsets[batch_id + 1];
+                int global_row = d_bad_indices[tid];
 
-            std::vector<int> h_value_offsets(sparseCount + 1);
-            for(int i = 0; i <= sparseCount; ++i) {
-                CHECK_CUDA(cudaMemcpy(&h_value_offsets[i], d_value_offsets + h_bad_offsets[i], sizeof(int), cudaMemcpyDeviceToHost));
-            }
+                int ptr_start = d_outer_ptrs[global_row];
+                int ptr_end = d_outer_ptrs[global_row + 1];
 
-            int total_nnz = h_value_offsets[sparseCount];
-            int total_row_offsets = total_sparse_dofs + sparseCount;
-
-            std::vector<int> row_starts(sparseCount);
-            std::vector<int> nnz_starts(sparseCount);
-            int running_row_offsets = 0;
-            
-            for (int i = 0; i < sparseCount; ++i) {
-                row_starts[i] = running_row_offsets;
-                nnz_starts[i] = h_value_offsets[i]; 
-                h_nnz[i] = h_value_offsets[i+1] - h_value_offsets[i];
-                running_row_offsets += h_nrows[i] + 1;
-                logger->trace("Size, NNZ, fill for batch {}: {}, {}, {}", i, h_nrows[i], h_nnz[i], h_nnz[i] / static_cast<double>(h_nrows[i] * h_nrows[i]));
-            }
-
-            // PASS 2: ALLOCATE AND FILL CSR
-            int *d_all_rowOffsets, *d_all_colIndices; double *d_all_values;
-            CHECK_CUDA(cudaMalloc(&d_all_rowOffsets, total_row_offsets * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_all_colIndices, total_nnz * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_all_values, total_nnz * sizeof(double)));
-
-            thrust::for_each(thrust::device, thrust::make_counting_iterator<int>(0), thrust::make_counting_iterator<int>(total_sparse_dofs),
-                [=] __device__ (int tid) {
-                    int l = 0, r = sparseCount - 1, batch_id = 0;
-                    while (l <= r) {
-                        int m = l + (r - l) / 2;
-                        if (d_bad_offsets[m] <= tid && tid < d_bad_offsets[m + 1]) { batch_id = m; break; } 
-                        else if (d_bad_offsets[m] > tid) r = m - 1; else l = m + 1;
-                    }
-                    int batch_start = d_bad_offsets[batch_id];
-                    int batch_end = d_bad_offsets[batch_id + 1];
-                    int local_row = tid - batch_start;
-                    int global_row = d_bad_indices[tid];
-
-                    int write_ptr = d_value_offsets[tid];
-                    int batch_nnz_start = d_value_offsets[batch_start];
-                    
-                    d_all_rowOffsets[batch_id + tid] = write_ptr - batch_nnz_start;
-                    if (local_row == (batch_end - batch_start - 1)) {
-                        d_all_rowOffsets[batch_id + tid + 1] = d_value_offsets[batch_end] - batch_nnz_start;
-                    }
-
-                    int ptr_start = d_outer_ptrs[global_row];
-                    int ptr_end = d_outer_ptrs[global_row + 1];
-
-                    for (int p = ptr_start; p < ptr_end; ++p) {
-                        int g_col = d_inner_indices[p];
-                        int cl = batch_start, cr = batch_end - 1;
-                        while (cl <= cr) {
-                            int cm = cl + (cr - cl) / 2;
-                            if (d_bad_indices[cm] == g_col) {
-                                d_all_colIndices[write_ptr] = cm - batch_start; 
-                                d_all_values[write_ptr] = d_values[p];
-                                write_ptr++; break;
-                            }
-                            if (d_bad_indices[cm] < g_col) cl = cm + 1; else cr = cm - 1;
-                        }
+                int count = 0;
+                for (int p = ptr_start; p < ptr_end; ++p) {
+                    int g_col = d_inner_indices[p];
+                    int cl = batch_start, cr = batch_end - 1;
+                    while (cl <= cr) {
+                        int cm = cl + (cr - cl) / 2;
+                        if (d_bad_indices[cm] == g_col) { count++; break; }
+                        if (d_bad_indices[cm] < g_col) cl = cm + 1;
+                        else cr = cm - 1;
                     }
                 }
-            );
-
-            for (int i = 0; i < sparseCount; ++i) {
-                h_csrRowOffsets_void[i] = static_cast<void*>(d_all_rowOffsets + row_starts[i]);
-                h_csrColIndices_void[i] = static_cast<void*>(d_all_colIndices + nnz_starts[i]);
-                h_csrValues_void[i] = static_cast<void*>(d_all_values + nnz_starts[i]);
+                d_nnz_per_row[tid] = count;
             }
+        );
 
-            CHECK_CUDA(cudaMalloc(&d_csrRowOffsets_void, sparseCount * sizeof(void*)));
-            CHECK_CUDA(cudaMalloc(&d_csrColIndices_void, sparseCount * sizeof(void*)));
-            CHECK_CUDA(cudaMalloc(&d_csrValues_void, sparseCount * sizeof(void*)));
-            CHECK_CUDA(cudaMalloc(&d_x_void, sparseCount * sizeof(void*)));
-            CHECK_CUDA(cudaMalloc(&d_b_void, sparseCount * sizeof(void*)));
+        // Prefix sum (exclusive scan)
+        thrust::device_ptr<int> t_nnz_per_row(d_nnz_per_row);
+        thrust::device_ptr<int> t_value_offsets(d_value_offsets);
+        thrust::exclusive_scan(thrust::device, t_nnz_per_row, t_nnz_per_row + total_bad_dofs + 1, t_value_offsets);
 
-            CHECK_CUDA(cudaMemcpy(d_csrRowOffsets_void, h_csrRowOffsets_void.data(), sparseCount * sizeof(void*), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_csrColIndices_void, h_csrColIndices_void.data(), sparseCount * sizeof(void*), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_csrValues_void, h_csrValues_void.data(), sparseCount * sizeof(void*), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_x_void, h_x_void.data(), sparseCount * sizeof(void*), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_b_void, h_b_void.data(), sparseCount * sizeof(void*), cudaMemcpyHostToDevice));
-
-            // EXECUTE CUDSS
-            CHECK_CUDSS(cudssMatrixCreateBatchDn(&batchMatrixX, sparseCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), d_x_void, CUDA_R_32I, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR));
-            CHECK_CUDSS(cudssMatrixCreateBatchDn(&batchMatrixB, sparseCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), d_b_void, CUDA_R_32I, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR));
-
-            {
-                POLYSOLVE_SCOPED_STOPWATCH("factorize cuDSS", dss_factorization_time, *logger);
-                CHECK_CUDSS(cudssMatrixCreateBatchCsr(&batchMatrixA, sparseCount, h_nrows.data(), h_ncols.data(), h_nnz.data(), d_csrRowOffsets_void, nullptr, d_csrColIndices_void, d_csrValues_void, CUDA_R_32I, CUDA_R_64F, CUDSS_MTYPE_SYMMETRIC, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-                CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_ANALYSIS, config, solverData, batchMatrixA, nullptr, nullptr));
-                CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_FACTORIZATION, config, solverData, batchMatrixA, nullptr, nullptr));
-                CHECK_CUDA(cudaDeviceSynchronize());
-            }
-
-            cudaFree(d_bad_indices);
-            cudaFree(d_bad_offsets);
-            cudaFree(d_nnz_per_row);
-            cudaFree(d_value_offsets);
+        // --- FETCH METADATA AND COMPUTE OFFSETS ---
+        std::vector<int> h_value_offsets(batchCount + 1);
+        for(int i = 0; i <= batchCount; ++i) {
+            CHECK_CUDA(cudaMemcpy(&h_value_offsets[i], d_value_offsets + h_bad_offsets[i], sizeof(int), cudaMemcpyDeviceToHost));
         }
 
-        // ---------------------------------------------------------
-        // 3. MAGMA PIPELINE (DENSE)
-        // ---------------------------------------------------------
-        if (denseCount > 0)
-        {
-            std::vector<int> dense_bad_dofs;
-            std::vector<int> h_dense_offsets(denseCount + 1, 0);
-            std::vector<int> h_dense_A_offsets(denseCount + 1, 0);
+        int total_nnz = h_value_offsets[batchCount];
+        int total_row_offsets = total_bad_dofs + batchCount;
 
-            CHECK_CUDA(cudaMalloc(&d_dense_ones, (denseCount + 1) * sizeof(magma_int_t)));
-            thrust::fill(thrust::device, d_dense_ones, d_dense_ones + denseCount + 1, 1);
+        std::vector<int> row_starts(batchCount);
+        std::vector<int> nnz_starts(batchCount);
+        std::vector<int> dof_starts(batchCount);
+
+        int running_row_offsets = 0;
+        int running_dofs = 0;
+        for (int i = 0; i < batchCount; ++i) {
+            row_starts[i] = running_row_offsets;
+            nnz_starts[i] = h_value_offsets[i]; 
+            dof_starts[i] = running_dofs;
             
-            std::vector<magma_int_t> h_dense_n(denseCount);
-            std::vector<double*> h_dense_A_ptrs(denseCount);
-            std::vector<double*> h_dense_X_ptrs(denseCount);
-            std::vector<magma_int_t*> h_dense_ipiv_ptrs(denseCount);
-
-            for (int i = 0; i < denseCount; ++i) {
-                int n = dense_meta[i].size;
-                h_dense_n[i] = n;
-
-                // Triggers implicit device-to-host copies via Thrust
-                dense_bad_dofs.insert(dense_bad_dofs.end(), dense_meta[i].indices->begin(), dense_meta[i].indices->end());
-                h_dense_offsets[i + 1] = h_dense_offsets[i] + n;
-                h_dense_A_offsets[i + 1] = h_dense_A_offsets[i] + (n * n);
-            }
-
-            total_dense_dofs = dense_bad_dofs.size();
-            int total_dense_elements = h_dense_A_offsets.back();
-            all_bad_dof_map.insert(all_bad_dof_map.end(), dense_bad_dofs.begin(), dense_bad_dofs.end());
-
-            // Ensure `double* d_dense_A_data` and `magma_int_t* d_ipiv_data` are added 
-            // to your class members so they can be cleaned up in `free_device_memory()`
-            double* d_dense_A_data;
-            magma_int_t* d_ipiv_data;
-            CHECK_CUDA(cudaMalloc(&d_dense_A_data, total_dense_elements * sizeof(double)));
-            CHECK_CUDA(cudaMemset(d_dense_A_data, 0, total_dense_elements * sizeof(double)));
-            CHECK_CUDA(cudaMalloc(&d_ipiv_data, total_dense_dofs * sizeof(magma_int_t)));
-
-            int *d_dense_bad_indices, *d_dense_dof_offsets, *d_dense_A_off;
-            CHECK_CUDA(cudaMalloc(&d_dense_bad_indices, total_dense_dofs * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_dense_dof_offsets, (denseCount + 1) * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_dense_A_off, (denseCount + 1) * sizeof(int)));
-
-            CHECK_CUDA(cudaMemcpy(d_dense_bad_indices, dense_bad_dofs.data(), total_dense_dofs * sizeof(int), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_dense_dof_offsets, h_dense_offsets.data(), (denseCount + 1) * sizeof(int), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_dense_A_off, h_dense_A_offsets.data(), (denseCount + 1) * sizeof(int), cudaMemcpyHostToDevice));
-
-            // PASS: SCATTER TO DENSE COLUMN-MAJOR
-            thrust::for_each(thrust::device, thrust::make_counting_iterator<int>(0), thrust::make_counting_iterator<int>(total_dense_dofs),
-                [=] __device__ (int tid) {
-                    int l = 0, r = denseCount - 1, batch_id = 0;
-                    while (l <= r) {
-                        int m = l + (r - l) / 2;
-                        if (d_dense_dof_offsets[m] <= tid && tid < d_dense_dof_offsets[m + 1]) { batch_id = m; break; } 
-                        else if (d_dense_dof_offsets[m] > tid) r = m - 1; else l = m + 1;
-                    }
-
-                    int batch_start = d_dense_dof_offsets[batch_id];
-                    int batch_end = d_dense_dof_offsets[batch_id + 1];
-                    int local_row = tid - batch_start;
-                    int global_row = d_dense_bad_indices[tid];
-                    int n = batch_end - batch_start;
-                    int A_offset = d_dense_A_off[batch_id];
-
-                    int ptr_start = d_outer_ptrs[global_row];
-                    int ptr_end = d_outer_ptrs[global_row + 1];
-
-                    for (int p = ptr_start; p < ptr_end; ++p) {
-                        int g_col = d_inner_indices[p];
-                        int cl = batch_start, cr = batch_end - 1;
-                        while (cl <= cr) {
-                            int cm = cl + (cr - cl) / 2;
-                            if (d_dense_bad_indices[cm] == g_col) {
-                                int local_col = cm - batch_start;
-                                // Write to dense column-major format: A[row + col * ld]
-                                d_dense_A_data[A_offset + local_col * n + local_row] = d_values[p];
-                                break;
-                            }
-                            if (d_dense_bad_indices[cm] < g_col) cl = cm + 1; else cr = cm - 1;
-                        }
-                    }
-                }
-            );
-
-            // SETUP MAGMA POINTERS
-            for (int i = 0; i < denseCount; ++i) {
-                h_dense_A_ptrs[i] = d_dense_A_data + h_dense_A_offsets[i];
-                h_dense_ipiv_ptrs[i] = d_ipiv_data + h_dense_offsets[i];
-                // Assign pointer to the shared d_x
-                h_dense_X_ptrs[i] = d_x + total_sparse_dofs + h_dense_offsets[i]; 
-            }
-
-            CHECK_CUDA(cudaMalloc(&d_dense_n, (denseCount + 1) * sizeof(magma_int_t)));
-            CHECK_CUDA(cudaMalloc(&d_dense_A, denseCount * sizeof(double*)));
-            CHECK_CUDA(cudaMalloc(&d_dense_X, denseCount * sizeof(double*)));
-            CHECK_CUDA(cudaMalloc(&d_dense_ipiv, denseCount * sizeof(magma_int_t*)));
-            CHECK_CUDA(cudaMalloc(&d_dense_info, denseCount * sizeof(magma_int_t)));
-
-            CHECK_CUDA(cudaMemcpy(d_dense_n, h_dense_n.data(), denseCount * sizeof(magma_int_t), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_dense_A, h_dense_A_ptrs.data(), denseCount * sizeof(double*), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_dense_X, h_dense_X_ptrs.data(), denseCount * sizeof(double*), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_dense_ipiv, h_dense_ipiv_ptrs.data(), denseCount * sizeof(magma_int_t*), cudaMemcpyHostToDevice));
-
-            // EXECUTE MAGMA
-            {
-                POLYSOLVE_SCOPED_STOPWATCH("factorize MAGMA", dss_factorization_time, *logger);
-                
-                // Reusing d_dense_n for ldda and lengths since systems are square dense matrices
-                magma_dgetrf_vbatched(
-                    d_dense_n, d_dense_n,
-                    d_dense_A, d_dense_n,
-                    d_dense_ipiv, d_dense_info,
-                    denseCount, magma_queue
-                );
-                CHECK_CUDA(cudaDeviceSynchronize());
-            }
-
-            cudaFree(d_dense_bad_indices);
-            cudaFree(d_dense_dof_offsets);
-            cudaFree(d_dense_A_off);
+            h_nnz[i] = h_value_offsets[i+1] - h_value_offsets[i];
+            
+            running_row_offsets += h_nrows[i] + 1;
+            running_dofs += h_nrows[i];
         }
 
-        // --- CLEANUP SHARED METADATA ---
+        // --- PASS 2: ALLOCATE AND FILL CSR ---
+        int* d_all_rowOffsets;
+        int* d_all_colIndices;
+        double* d_all_values;
+
+        CHECK_CUDA(cudaMalloc(&d_all_rowOffsets, total_row_offsets * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_all_colIndices, total_nnz * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_all_values, total_nnz * sizeof(double)));
+
+        thrust::for_each(thrust::device,
+            thrust::make_counting_iterator<int>(0),
+            thrust::make_counting_iterator<int>(total_bad_dofs),
+            [=] __device__ (int tid) {
+                int l = 0, r = batchCount - 1;
+                int batch_id = 0;
+                while (l <= r) {
+                    int m = l + (r - l) / 2;
+                    if (d_bad_offsets[m] <= tid && tid < d_bad_offsets[m + 1]) {
+                        batch_id = m; break;
+                    } else if (d_bad_offsets[m] > tid) r = m - 1;
+                    else l = m + 1;
+                }
+
+                int batch_start = d_bad_offsets[batch_id];
+                int batch_end = d_bad_offsets[batch_id + 1];
+                int local_row = tid - batch_start;
+                int global_row = d_bad_indices[tid];
+
+                int write_ptr = d_value_offsets[tid];
+                int batch_nnz_start = d_value_offsets[batch_start];
+                
+                d_all_rowOffsets[batch_id + tid] = write_ptr - batch_nnz_start;
+
+                if (local_row == (batch_end - batch_start - 1)) {
+                    d_all_rowOffsets[batch_id + tid + 1] = d_value_offsets[batch_end] - batch_nnz_start;
+                }
+
+                int ptr_start = d_outer_ptrs[global_row];
+                int ptr_end = d_outer_ptrs[global_row + 1];
+
+                for (int p = ptr_start; p < ptr_end; ++p) {
+                    int g_col = d_inner_indices[p];
+                    int cl = batch_start, cr = batch_end - 1;
+                    while (cl <= cr) {
+                        int cm = cl + (cr - cl) / 2;
+                        if (d_bad_indices[cm] == g_col) {
+                            d_all_colIndices[write_ptr] = cm - batch_start; 
+                            d_all_values[write_ptr] = d_values[p];
+                            write_ptr++;
+                            break;
+                        }
+                        if (d_bad_indices[cm] < g_col) cl = cm + 1;
+                        else cr = cm - 1;
+                    }
+                }
+            }
+        );
+
+        // --- LINK UP CUDSS POINTERS ---
+        for (int i = 0; i < batchCount; ++i)
+        {
+            h_csrRowOffsets_void[i] = static_cast<void*>(d_all_rowOffsets + row_starts[i]);
+            h_csrColIndices_void[i] = static_cast<void*>(d_all_colIndices + nnz_starts[i]);
+            h_csrValues_void[i] = static_cast<void*>(d_all_values + nnz_starts[i]);
+        }
+
+        CHECK_CUDA(cudaMalloc(&d_csrRowOffsets_void, batchCount * sizeof(void*)));
+        CHECK_CUDA(cudaMalloc(&d_csrColIndices_void, batchCount * sizeof(void*)));
+        CHECK_CUDA(cudaMalloc(&d_csrValues_void, batchCount * sizeof(void*)));
+
+        CHECK_CUDA(cudaMalloc(&d_x, total_bad_dofs * sizeof(double)));
+        CHECK_CUDA(cudaMalloc(&d_b, total_bad_dofs * sizeof(double)));
+
+        h_x_void.clear();
+        h_b_void.clear();
+
+        for (int i = 0; i < batchCount; ++i)
+        {
+            h_x_void.push_back(static_cast<void*>(d_x + dof_starts[i]));
+            h_b_void.push_back(static_cast<void*>(d_b + dof_starts[i]));
+        }
+
+        CHECK_CUDA(cudaMalloc(&d_x_void, batchCount * sizeof(void*)));
+        CHECK_CUDA(cudaMalloc(&d_b_void, batchCount * sizeof(void*)));
+
+        CHECK_CUDA(cudaMemcpy(d_csrRowOffsets_void, h_csrRowOffsets_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_csrColIndices_void, h_csrColIndices_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_csrValues_void, h_csrValues_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
+
+        CHECK_CUDA(cudaMemcpy(d_x_void, h_x_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_b_void, h_b_void.data(), batchCount * sizeof(void*), cudaMemcpyHostToDevice));
+
+        // --- CUDSS EXECUTION ---
+        CHECK_CUDSS(cudssMatrixCreateBatchDn(
+            &batchMatrixX, batchCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), 
+            d_x_void, CUDA_R_32I, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
+        ));
+
+        CHECK_CUDSS(cudssMatrixCreateBatchDn(
+            &batchMatrixB, batchCount, h_nrows.data(), h_vec_ncols.data(), h_ld.data(), 
+            d_b_void, CUDA_R_32I, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
+        ));
+
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("factorize D", dss_factorization_time, *logger);
+
+            CHECK_CUDSS(cudssMatrixCreateBatchCsr(
+                &batchMatrixA, batchCount, h_nrows.data(), h_ncols.data(), h_nnz.data(), 
+                d_csrRowOffsets_void, nullptr, d_csrColIndices_void, d_csrValues_void, 
+                CUDA_R_32I, CUDA_R_64F, CUDSS_MTYPE_SYMMETRIC, 
+                CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO
+            ));
+
+            CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_ANALYSIS, config, solverData, 
+                                    batchMatrixA, nullptr, nullptr));
+            CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_FACTORIZATION, config, solverData, 
+                                batchMatrixA, nullptr, nullptr));
+            CHECK_CUDA(cudaDeviceSynchronize());
+        }
+
+        // --- CLEANUP ---
+        cudaFree(d_bad_indices);
+        cudaFree(d_bad_offsets);
+        cudaFree(d_nnz_per_row);
+        cudaFree(d_value_offsets);
         cudaFree(d_outer_ptrs);
         cudaFree(d_inner_indices);
         cudaFree(d_values);
-
     }
 
     void GPUHybridSolver::pcg_solve(double* rhs, double* result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond)
@@ -1355,10 +1176,6 @@ namespace polysolve::linear
             cudssDestroy(cudss_handle);
             cudss_handle = nullptr;
         }
-        if (magma_queue) {
-            magma_queue_destroy(magma_queue);
-        }
-        magma_finalize();
     }
 
     void GPUHybridSolver::free_device_memory() 
@@ -1383,12 +1200,5 @@ namespace polysolve::linear
         // Free GPU Data Arrays
         if (d_x)             { cudaFree(d_x); d_x = nullptr; }
         if (d_b)             { cudaFree(d_b); d_b = nullptr; }
-
-        if (d_dense_ones)    { cudaFree(d_dense_ones); d_dense_ones = nullptr; }
-        if (d_dense_n)       { cudaFree(d_dense_n); d_dense_n = nullptr; }
-        if (d_dense_A)       { cudaFree(d_dense_A); d_dense_A = nullptr; }
-        if (d_dense_X)       { cudaFree(d_dense_X); d_dense_X = nullptr; }
-        if (d_dense_ipiv)    { cudaFree(d_dense_ipiv); d_dense_ipiv = nullptr; }
-        if (d_dense_info)    { cudaFree(d_dense_info); d_dense_info = nullptr; }
     }
 }
