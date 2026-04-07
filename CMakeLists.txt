@@ -313,10 +313,14 @@ if(POLYSOLVE_WITH_ICHOL)
     target_compile_definitions(polysolve_linear PUBLIC POLYSOLVE_WITH_ICHOL)
 endif()
 
+include(magma)
+target_link_libraries(polysolve_linear PRIVATE magma)
+target_include_directories(polysolve_linear PRIVATE ${MAGMA_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/include)
+
 find_package(METIS REQUIRED)
 target_link_libraries(polysolve_linear PRIVATE METIS::METIS)
 
-set(cudss_DIR "/mnt/ssd2/mjp16/Development/libcudss-linux-x86_64-0.7.1.4_cuda12-archive/lib/cmake/cudss")
+#set(cudss_DIR "/mnt/ssd2/mjp16/Development/libcudss-linux-x86_64-0.7.1.4_cuda12-archive/lib/cmake/cudss")
 find_package(cudss REQUIRED)
 target_link_libraries(polysolve_linear PUBLIC cudss)
 
