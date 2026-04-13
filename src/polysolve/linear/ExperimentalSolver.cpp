@@ -991,7 +991,7 @@ namespace polysolve::linear
 
             double work_time;
             {
-                POLYSOLVE_SCOPED_STOPWATCH("dss work time: ", work_time, *logger);
+                POLYSOLVE_SCOPED_STOPWATCH("dss backsub time: ", work_time, *logger);
                 next_z.setZero();
             
                 int index_counter = 0;
@@ -1286,7 +1286,14 @@ namespace polysolve::linear
         {
             Eigen::SparseMatrix<double> D;
             assemble_D(i_counter, i, D);
-            
+
+            if (false && i_counter == 0)
+            {
+                std::fstream file("D.txt", std::ios_base::out);
+                file << D;
+                file.close();
+            }
+
             if (print_subdomain_conditioning)
             {
                 Eigen::EigenSolver<Eigen::MatrixXd> es(D);
@@ -1299,6 +1306,7 @@ namespace polysolve::linear
             {
                 POLYSOLVE_SCOPED_STOPWATCH("factorize D", dss_factorization_time, *logger);
                 D_solvers[i_counter]->compute(D);
+                D_solvers[i_counter]->print_nnz();
             }
 
             ++i_counter;

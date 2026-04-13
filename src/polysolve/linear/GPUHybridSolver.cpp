@@ -108,6 +108,10 @@ namespace polysolve::linear
             {
                 bad_dof_threshold = params["GPUHybridSolver"]["bad_dof_threshold"];
             }
+            if (params["GPUHybridSolver"].contains("max_dense_size"))
+            {
+                max_dense_size = params["GPUHybridSolver"]["max_dense_size"];
+            }   
         }
     } 
 
@@ -1015,6 +1019,14 @@ namespace polysolve::linear
                                     batchMatrixA, nullptr, nullptr));
             CHECK_CUDSS(cudssExecute(cudss_handle, CUDSS_PHASE_FACTORIZATION, config, solverData, 
                                 batchMatrixA, nullptr, nullptr));
+
+            int64_t lu_nnz = 0;
+            size_t bytes_written = 0;
+
+            CHECK_CUDSS(cudssDataGet(cudss_handle, solverData, CUDSS_DATA_LU_NNZ, 
+                                &lu_nnz, sizeof(int64_t), &bytes_written));
+
+            logger->trace("Total LU nnz: {}", lu_nnz);
             CHECK_CUDA(cudaDeviceSynchronize());
         }
 

@@ -18,6 +18,7 @@
 #include <cudss.h>
 #include <thrust/device_vector.h>
 
+
 extern "C" {
     HYPRE_Int hypre_ParVectorAxpy(HYPRE_Complex alpha, HYPRE_ParVector x, HYPRE_ParVector y);
 }
@@ -172,6 +173,8 @@ namespace polysolve::linear
         double matmul_time;
         double prepare_dss_time;
         double decomp_time;
+
+        int max_dense_size = 1000;
 
     public:
         void copy_matrix_to_hypre();

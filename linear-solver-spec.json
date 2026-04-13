@@ -761,7 +761,8 @@
             "decompose_subdomains",
             "min_subdomain_size",
             "max_subdomain_size",
-            "find_threshold_from_secant"
+            "find_threshold_from_secant",
+            "max_dense_size"
         ],
         "doc": "Settings for the GPUHybridSolver."
     },
@@ -854,5 +855,12 @@
         "default": false,
         "type": "bool",
         "doc": "If true, find threshold from secant line."
-    }                   
+    },
+    {
+        "pointer": "/GPUHybridSolver/max_dense_size",
+        "default": 1000,
+        "type": "int",
+        "doc": "Maximum size of dense submatrix for direct solve."
+    }                
+
 ]

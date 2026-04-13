@@ -10,6 +10,8 @@
 #include <string>
 #include <iostream>
 
+#include "../Utils.hpp"
+
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace polysolve::linear
@@ -128,7 +130,9 @@ namespace polysolve::linear
         }
         gpuErrchk(cudaMemcpy(d_A, (const void *)convert<T>(A).data(), sizeof(T) * A.size(), cudaMemcpyHostToDevice));
 
+        
         cusolverDnXgetrf_bufferSize(cuHandle, cuParams, numrows, numrows, cuda_type<T>(), d_A, numrows, cuda_type<T>(), &d_lwork, &h_lwork);
+
         if (!d_A_alloc)
         {
             gpuErrchk(cudaMalloc(reinterpret_cast<void **>(&d_work), sizeof(T) * d_lwork));
@@ -139,8 +143,14 @@ namespace polysolve::linear
         int info = 0;
 
         // factorize
-        cusolverStatus_t solvererr = cusolverDnXgetrf(cuHandle, cuParams, numrows, numrows, cuda_type<T>(), d_A,
-                                                      numrows, d_Ipiv, cuda_type<T>(), d_work, d_lwork, h_work, h_lwork, d_info);
+        double fac_time;
+        cusolverStatus_t solvererr;
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("actual factorization time", fac_time, *logger);
+            solvererr = cusolverDnXgetrf(cuHandle, cuParams, numrows, numrows, cuda_type<T>(), d_A,
+                                                        numrows, d_Ipiv, cuda_type<T>(), d_work, d_lwork, h_work, h_lwork, d_info);
+            cudaDeviceSynchronize();
+        }
 
         if (solvererr == CUSOLVER_STATUS_INVALID_VALUE)
         {
@@ -161,9 +171,15 @@ namespace polysolve::linear
         gpuErrchk(cudaMemcpy(d_b, (const void *)convert_vec<T>(b).data(), sizeof(T) * b.size(), cudaMemcpyHostToDevice));
 
         // solve
-        cusolverStatus_t solvererr = cusolverDnXgetrs(cuHandle, cuParams, CUBLAS_OP_N, numrows, 1,
-                                                      cuda_type<T>(), d_A, numrows, d_Ipiv,
-                                                      cuda_type<T>(), d_b, numrows, d_info);
+        double sol_time;
+        cusolverStatus_t solvererr;
+        {
+            POLYSOLVE_SCOPED_STOPWATCH("actual solve time", sol_time, *logger);
+            solvererr = cusolverDnXgetrs(cuHandle, cuParams, CUBLAS_OP_N, numrows, 1,
+                                                        cuda_type<T>(), d_A, numrows, d_Ipiv,
+                                                        cuda_type<T>(), d_b, numrows, d_info);
+            cudaDeviceSynchronize();
+        }
         if (solvererr == CUSOLVER_STATUS_INVALID_VALUE)
         {
             throw std::invalid_argument("CUDA returned invalid value");
@@ -206,7 +222,7 @@ namespace polysolve::linear
 
 } // namespace polysolve::linear
 
-template polysolve::CuSolverDN<double>::CuSolverDN();
-template polysolve::CuSolverDN<float>::CuSolverDN();
+template polysolve::linear::CuSolverDN<double>::CuSolverDN();
+template polysolve::linear  ::CuSolverDN<float>::CuSolverDN();
 
 #endif

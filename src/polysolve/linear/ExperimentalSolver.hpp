@@ -30,6 +30,7 @@ namespace polysolve::linear
         virtual void compute(const Eigen::SparseMatrix<double>& A) = 0;
         virtual Eigen::VectorXd solve(const Eigen::VectorXd& b) = 0;
         virtual ~AbstractSolver() = default;
+        virtual void print_nnz() {}
     };
 
     template <typename EigenSolverT>
@@ -43,6 +44,34 @@ namespace polysolve::linear
         Eigen::VectorXd solve(const Eigen::VectorXd& b) override {
             return solver.solve(b);
         }
+        template <typename T>
+        auto print_nnz_impl(T& s, int) -> decltype(s.pardisoParameterArray(), void()) {
+            long long fill_in = s.pardisoParameterArray()[17];
+            std::cout << "Total LU nnz: " << fill_in << std::endl;
+        }
+
+        // 2. SFINAE overload for Eigen::SimplicialLDLT
+        // The compiler only builds this if matrixL() and vectorD() exist.
+        template <typename T>
+        auto print_nnz_impl(T& s, long) -> decltype(s.matrixL(), s.vectorD(), void()) {
+            long long fill_in = (2 * s.matrixL().nestedExpression().nonZeros()) + s.vectorD().size();
+            std::cout << "Total LU nnz: " << fill_in << std::endl;
+        }
+
+        // 3. Fallback overload
+        // The compiler defaults to this if neither of the above are valid for the solver type.
+        template <typename T>
+        void print_nnz_impl(T&, ...) {
+            // Do nothing (or add a warning if you accidentally pass a different solver)
+        }
+
+        void print_nnz() override {
+            // Passing 0 triggers the SFINAE resolution.
+            // It tries the `int` overload first, then the `long` overload, 
+            // and finally falls back to the `...` overload.
+            print_nnz_impl(solver, 0);
+        }
+
     };
 
     class ExperimentalSolver : public Solver
