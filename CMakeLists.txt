@@ -313,9 +313,9 @@ if(POLYSOLVE_WITH_ICHOL)
     target_compile_definitions(polysolve_linear PUBLIC POLYSOLVE_WITH_ICHOL)
 endif()
 
-include(magma)
-target_link_libraries(polysolve_linear PRIVATE magma)
-target_include_directories(polysolve_linear PRIVATE ${MAGMA_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/include)
+# include(magma)
+# target_link_libraries(polysolve_linear PRIVATE magma)
+# target_include_directories(polysolve_linear PRIVATE ${MAGMA_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/include)
 
 #find_package(CUDAToolkit REQUIRED)
 #include_directories(SYSTEM ${CUDAToolkit_INCLUDE_DIRS})
