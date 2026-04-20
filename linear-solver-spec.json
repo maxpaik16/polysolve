@@ -498,7 +498,10 @@
             "max_subdomain_size",
             "jacobi_precondition_system",
             "find_threshold_from_secant",
-            "jacobi_damping_factor"
+            "jacobi_damping_factor",
+            "do_chebyshev_on_subdomains",
+            "chebyshev_iters",
+            "chebyshev_beta"
         ],
         "doc": "Settings for the Experimental solver."
     },
@@ -743,6 +746,24 @@
         "doc": "Damping factor for Jacobi preconditioning."
     },
     {
+        "pointer": "/Experimental/do_chebyshev_on_subdomains",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to use Chebyshev preconditioning on subdomains."
+    },
+    {
+        "pointer": "/Experimental/chebyshev_iters",
+        "default": 100,
+        "type": "int",
+        "doc": "Number of Chebyshev iterations to use during preconditioning."
+    },
+    {
+        "pointer": "/Experimental/chebyshev_beta",
+        "default": 100.0,
+        "type": "float",
+        "doc": "Multiplicative factor below top estimated eigenvalue to smooth in Chebyshev preconditioning."
+    },
+    {
         "pointer": "/GPUHybridSolver",
         "default": null,
         "type": "object",
@@ -762,7 +783,10 @@
             "min_subdomain_size",
             "max_subdomain_size",
             "find_threshold_from_secant",
-            "max_dense_size"
+            "max_dense_size",
+            "do_chebyshev_on_subdomains",
+            "chebyshev_iters",
+            "chebyshev_beta"
         ],
         "doc": "Settings for the GPUHybridSolver."
     },
@@ -861,6 +885,23 @@
         "default": 1000,
         "type": "int",
         "doc": "Maximum size of dense submatrix for direct solve."
-    }                
-
+    },                
+    {
+        "pointer": "/GPUHybridSolver/do_chebyshev_on_subdomains",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to use Chebyshev preconditioning on subdomains."
+    },
+    {
+        "pointer": "/GPUHybridSolver/chebyshev_iters",
+        "default": 100,
+        "type": "int",
+        "doc": "Number of Chebyshev iterations to use during preconditioning."
+    },
+    {
+        "pointer": "/GPUHybridSolver/chebyshev_beta",
+        "default": 100.0,
+        "type": "float",
+        "doc": "Multiplicative factor below top estimated eigenvalue to smooth in Chebyshev preconditioning."
+    }
 ]

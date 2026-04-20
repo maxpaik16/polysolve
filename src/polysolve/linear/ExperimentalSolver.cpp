@@ -24,6 +24,8 @@
 #include <SymEigsSolver.h>
 #include <MatOp/SparseSymMatProd.h>
 
+#include <Eigen/src/IterativeLinearSolvers/ConjugateGradient.h>
+
 namespace polysolve::linear
 {
 
@@ -234,6 +236,18 @@ namespace polysolve::linear
             if (params["Experimental"].contains("jacobi_damping_factor"))
             {
                 jacobi_damping_factor = params["Experimental"]["jacobi_damping_factor"];
+            }
+            if (params["Experimental"].contains("do_chebyshev_on_subdomains"))
+            {
+                do_chebyshev_on_subdomains = params["Experimental"]["do_chebyshev_on_subdomains"];
+            }
+            if (params["Experimental"].contains("chebyshev_iters"))
+            {
+                chebyshev_iters = params["Experimental"]["chebyshev_iters"];
+            }
+            if (params["Experimental"].contains("chebyshev_beta"))
+            {
+                chebyshev_beta = params["Experimental"]["chebyshev_beta"];
             }
         }
     }
@@ -1011,7 +1025,44 @@ namespace polysolve::linear
                     }
 
                     {
-                        sub_result = D_solvers[index_counter]->solve(sub_rhs);
+                        if (do_chebyshev_on_subdomains)
+                        {
+                            sub_result.setZero();
+                            const double lambda_max = DiagInvD_estimated_max_eigenvalues[index_counter];
+                            const double lambda_min = lambda_max / chebyshev_beta; 
+
+                            const double d = (lambda_max + lambda_min) / 2.0;
+                            const double c = (lambda_max - lambda_min) / 2.0;
+                            const double rho = c / d;
+                            const double rho_sq = rho * rho;
+
+                            Eigen::VectorXd z = D_inv_diags[index_counter] * sub_rhs;
+                            Eigen::VectorXd x_curr = z / d;
+                            Eigen::VectorXd x_prev = sub_result;
+                            Eigen::VectorXd x_new = Eigen::VectorXd::Zero(sub_result.size());
+
+                            double omega = 2.0 / (2.0 - rho_sq);
+
+                            for (int k = 1; k < chebyshev_iters; ++k)
+                            {
+                                Eigen::VectorXd r = sub_rhs;
+                                r.noalias() -= D_systems[index_counter] * x_curr;
+                                
+                                z.noalias() = D_inv_diags[index_counter] * r;
+                                x_new.noalias() = omega * (z / d + x_curr - x_prev) + x_prev;
+
+                                omega = 1.0 / (1.0 - (rho_sq * omega) / 4.0);
+                                
+                                std::swap(x_prev, x_curr);
+                                std::swap(x_curr, x_new);
+                            }
+
+                            std::swap(sub_result, x_curr);
+                        }
+                        else 
+                        {
+                            sub_result = D_solvers[index_counter]->solve(sub_rhs);
+                        }
                     }
 
                     for (int i = 0; i < subdomain.size(); ++i)
@@ -1266,6 +1317,8 @@ namespace polysolve::linear
     {
         POLYSOLVE_SCOPED_STOPWATCH("assemble D", dss_assembly_time, *logger);
         D_solvers.clear();
+        D_systems.clear();
+        DiagInvD_estimated_max_eigenvalues.clear();
 
         for (int i : bad_subdomain_assignments[myid])
         {   
@@ -1287,13 +1340,6 @@ namespace polysolve::linear
             Eigen::SparseMatrix<double> D;
             assemble_D(i_counter, i, D);
 
-            if (false && i_counter == 0)
-            {
-                std::fstream file("D.txt", std::ios_base::out);
-                file << D;
-                file.close();
-            }
-
             if (print_subdomain_conditioning)
             {
                 Eigen::EigenSolver<Eigen::MatrixXd> es(D);
@@ -1303,12 +1349,31 @@ namespace polysolve::linear
 
             project_D(D);
 
+            if (do_chebyshev_on_subdomains)
+            {
+                POLYSOLVE_SCOPED_STOPWATCH("setup chebyshev", chebyshev_setup_time, *logger);
+                
+                auto D_inv_diag = D.diagonal().asDiagonal().inverse();
+                D_systems.push_back(D);
+                D_inv_diags.push_back(D_inv_diag);
+
+                double maxRowSum = 0;
+                for (int k = 0; k < D.outerSize(); ++k) {
+                    double currentSum = 0;
+                    for (Eigen::SparseMatrix<double>::InnerIterator it(D, k); it; ++it) {
+                        currentSum += fabs(it.value());
+                    }
+                    currentSum *= fabs(D_inv_diag.diagonal()[k]);
+                    if (currentSum > maxRowSum) maxRowSum = currentSum;
+                }
+                DiagInvD_estimated_max_eigenvalues.push_back(maxRowSum);
+            }
+            else
             {
                 POLYSOLVE_SCOPED_STOPWATCH("factorize D", dss_factorization_time, *logger);
                 D_solvers[i_counter]->compute(D);
                 D_solvers[i_counter]->print_nnz();
             }
-
             ++i_counter;
         }
         

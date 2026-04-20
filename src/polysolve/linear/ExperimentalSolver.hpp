@@ -155,6 +155,9 @@ namespace polysolve::linear
         bool use_minres = false;
         int m_ = 10;
         int num_threads = 1; 
+        bool do_chebyshev_on_subdomains = false;
+        int chebyshev_iters = 100;
+        double chebyshev_beta = 100.0;
 
         // Debugging / analysis settings
         bool print_conditioning = false;
@@ -197,6 +200,10 @@ namespace polysolve::linear
         std::vector<std::vector<int>> bad_indices_arrays;
         std::vector<std::vector<int>> bad_subdomain_assignments;
         std::vector<std::unordered_map<int, int>> index_mappings;
+
+        std::vector<double> DiagInvD_estimated_max_eigenvalues;
+        std::vector<Eigen::SparseMatrix<double>> D_systems;
+        std::vector<Eigen::DiagonalMatrix<double, Eigen::Dynamic>> D_inv_diags;
 
         Eigen::VectorXd z1, z2, z3;
 
@@ -243,6 +250,7 @@ namespace polysolve::linear
         double decomp_time;
         double print_cond_time;
         double scatter_matrix_time;
+        double chebyshev_setup_time;
 
         // factorization helpers
         void scatter_matrix();

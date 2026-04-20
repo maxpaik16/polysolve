@@ -17,6 +17,7 @@
 
 #include <cudss.h>
 #include <thrust/device_vector.h>
+#include <cublas_v2.h>
 
 
 extern "C" {
@@ -112,6 +113,28 @@ namespace polysolve::linear
         cudssMatrix_t batchMatrixX = nullptr;
         cudssMatrix_t batchMatrixB = nullptr;
 
+        cublasHandle_t cublas_handle = nullptr;
+
+        int dense_batch_count = 0;
+        int num_dense_subsystems = 0;
+        int max_dense_dim = 0;
+        int sparseBatchCount = 0;
+
+        // --- Dense Subsystem Mapping (Device Pointers) ---
+        int* d_d_orig_idx = nullptr;
+        int* d_d_batch_id = nullptr;
+        int* d_d_local_offset = nullptr;
+        int* d_d_nrows = nullptr;
+
+        // --- Dense Factorization & Solve Data (Device Pointers) ---
+        double* d_dense_matrices = nullptr; // Padded matrices (overwritten with LU)
+        double** d_dense_ptrs = nullptr;    // Array of pointers to each matrix
+        int* d_pivots = nullptr;            // Pivot arrays from GETRF
+        int* d_info = nullptr;              // Error info from cuBLAS/cuSolver
+        
+        double* d_dense_x = nullptr;        // Padded RHS/Solution vectors
+        double** d_dense_x_ptrs = nullptr;  // Array of pointers to each RHS vector
+
         void free_device_memory();
 
         // Dimensions (kept as class members to ensure pointers survive across phases)
@@ -150,6 +173,36 @@ namespace polysolve::linear
         void **d_x_void = nullptr;
         void **d_b_void = nullptr;
 
+        void **d_sparse_x = nullptr;
+        void **d_sparse_b = nullptr;
+
+        int* d_matrix_dof_starts = nullptr; // For binary search in kernels
+
+        double* d_x_curr;
+        double* d_x_prev;
+        double* d_x_new;
+        double* d_d;
+        double* d_rho_sq;
+        double* d_omega;
+
+        std::vector<int> row_starts;
+        std::vector<int> nnz_starts;
+        std::vector<int> dof_starts;
+
+        double* d_max_estimated_eigenvalues = nullptr;
+
+        std::vector<int> h_sparse_nrows;
+        std::vector<int> h_sparse_ncols;
+        std::vector<int> h_sparse_nnz;
+        std::vector<int> h_sparse_vec_ncols;
+        std::vector<int> h_sparse_ld;
+        
+        std::vector<void*> h_sparse_csrRowOffsets;
+        std::vector<void*> h_sparse_csrColIndices;
+        std::vector<void*> h_sparse_csrValues;
+        std::vector<void*> h_sparse_x;
+        std::vector<void*> h_sparse_b;
+
         // timing variables
         double copy_b_and_x_time;
         double set_options_time;
@@ -173,8 +226,12 @@ namespace polysolve::linear
         double matmul_time;
         double prepare_dss_time;
         double decomp_time;
+        double chebyshev_setup_time;
 
         int max_dense_size = 1000;
+        bool do_chebyshev_on_subdomains = false;
+        int chebyshev_iters = 100;
+        double chebyshev_beta = 100.0;
 
     public:
         void copy_matrix_to_hypre();
@@ -202,6 +259,7 @@ namespace polysolve::linear
         void select_bad_indices();
         void factorize_submatrix();
         void assemble_D(int bad_i, int i, Eigen::SparseMatrix<double, Eigen::RowMajor>& D);
+        void allocate_subdomains();
 
         // Krylov solve methods
         void pcg_solve(double* rhs, double* result, HYPRE_ParVector &par_b, HYPRE_ParVector &par_x, HYPRE_Solver &precond);
