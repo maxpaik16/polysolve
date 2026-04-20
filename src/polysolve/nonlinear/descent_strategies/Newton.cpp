@@ -41,22 +41,6 @@ namespace polysolve::nonlinear
 
         std::vector<std::shared_ptr<DescentStrategy>> res;
 
-        const bool force_ppn = solver_params["Newton"]["force_ppn"];
-        if (force_ppn) {
-            res.push_back(std::make_unique<ProgressivelyProjectedNewton>(
-                sparse, ppn_solver_params, linear_solver_params,
-                characteristic_length, logger));
-
-            /*const double reg_weight_min = solver_params["Newton"]["reg_weight_min"];
-            if (reg_weight_min > 0)
-                res.push_back(std::make_unique<RegularizedNewton>(
-                    sparse, solver_params["Newton"]["use_psd_projection_in_regularized"],
-                    reg_solver_params, linear_solver_params,
-                    characteristic_length, logger));*/
-
-            return res;
-        }
-
         const bool force_psd_projection = solver_params["Newton"]["force_psd_projection"];
         if (!force_psd_projection)
             res.push_back(std::make_unique<Newton>(
@@ -125,16 +109,6 @@ namespace polysolve::nonlinear
     {
     }
 
-    ProgressivelyProjectedNewton::ProgressivelyProjectedNewton(
-        const bool sparse,
-        const json &solver_params,
-        const json &linear_solver_params,
-        const double characteristic_length,
-        spdlog::logger &logger)
-        : Superclass(sparse, extract_param("ProjectedNewton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger, norm_type)
-    {
-    }
-
     RegularizedNewton::RegularizedNewton(
         const bool sparse,
         const bool project_to_psd,
@@ -174,14 +148,6 @@ namespace polysolve::nonlinear
     {
         Superclass::reset(ndof);
         reg_weight = reg_weight_min;
-    }
-
-    void ProgressivelyProjectedNewton::reset(const int ndof)
-    {
-        Superclass::reset(ndof);
-        double d = std::numeric_limits<double>::infinity();
-        last_residual.resize(0);
-        curr_attempts = 0;
     }
 
     // =======================================================================
@@ -361,57 +327,6 @@ namespace polysolve::nonlinear
         }
     }
 
-    void ProgressivelyProjectedNewton::compute_hessian(Problem &objFunc,
-                                          const TVector &x,
-                                          polysolve::StiffnessMatrix &hessian)
-    {
-        objFunc.set_project_to_psd(false);
-        if (std::isinf(d))
-        {
-            objFunc.projection_setting = 0;
-        }
-        else {
-            objFunc.projection_setting = 3;
-            objFunc.dofs_to_project.clear();
-            for (int i = 0; i < last_residual.size(); ++i)
-            {
-                if (std::abs(last_residual(i)) > d) {
-                    objFunc.dofs_to_project.insert(i);
-                }
-            }
-        }
-        objFunc.hessian(x, hessian);
-
-        if (compare_to_full)
-        {
-            polysolve::StiffnessMatrix full_hessian;
-            objFunc.set_project_to_psd(false);
-            objFunc.projection_setting = 0;
-            objFunc.hessian(x, full_hessian);
-
-            polysolve::StiffnessMatrix diff_hessian = full_hessian - hessian;
-            Eigen::MatrixXd HTH = diff_hessian.transpose() * diff_hessian;
-
-            Spectra::DenseSymMatProd<double> op(HTH);
-            Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN, Spectra::DenseSymMatProd<double>> eigs(&op, 1, 6);
-
-            eigs.init();
-            int nconv = eigs.compute();
-            Eigen::VectorXd eigenvalues;
-            if (eigs.info() == Spectra::SUCCESSFUL)
-                eigenvalues = eigs.eigenvalues();
-
-            double largestSingularValue = eigenvalues(0); 
-
-            m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
-
-            Eigen::SimplicialLDLT<polysolve::StiffnessMatrix> chol_decomp(full_hessian);
-            bool spd = !(chol_decomp.info() == Eigen::NumericalIssue);
-            m_logger.trace("Hessian isSPD: {}", spd);
-
-        }
-    }
-
     void RegularizedNewton::compute_hessian(Problem &objFunc,
                                             const TVector &x,
                                             polysolve::StiffnessMatrix &hessian)
@@ -499,38 +414,6 @@ namespace polysolve::nonlinear
         }
     }
 
-    void ProgressivelyProjectedNewton::compute_hessian(Problem &objFunc,
-                                          const TVector &x,
-                                          Eigen::MatrixXd &hessian)
-    {
-        objFunc.projection_setting = 3;
-        objFunc.hessian(x, hessian);
-
-        if (compare_to_full)
-        {
-            Eigen::MatrixXd full_hessian;
-            objFunc.set_project_to_psd(false);
-            objFunc.projection_setting = 0;
-            objFunc.hessian(x, full_hessian);
-
-            Eigen::MatrixXd diff_hessian = full_hessian - hessian;
-            Eigen::MatrixXd HTH = diff_hessian.transpose() * diff_hessian;
-
-            Spectra::DenseSymMatProd<double> op(HTH);
-            Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN, Spectra::DenseSymMatProd<double>> eigs(&op, 1, 6);
-
-            eigs.init();
-            int nconv = eigs.compute();
-            Eigen::VectorXd eigenvalues;
-            if (eigs.info() == Spectra::SUCCESSFUL)
-                eigenvalues = eigs.eigenvalues();
-
-            double largestSingularValue = eigenvalues(0); 
-
-            m_logger.trace("L2 Norm of Hessian - Proj(Hessian): {}", largestSingularValue);
-        }
-    }
-
     void RegularizedNewton::compute_hessian(Problem &objFunc,
                                             const TVector &x,
                                             Eigen::MatrixXd &hessian)
@@ -560,30 +443,6 @@ namespace polysolve::nonlinear
         }
     }
 
-    bool ProgressivelyProjectedNewton::handle_error()
-    {
-        if (std::isinf(d))
-        {
-            d = alpha * last_residual.cwiseAbs().maxCoeff();
-        }
-        else 
-        {
-            d *= alpha;
-        }
-
-        ++curr_attempts;
-        return curr_attempts < max_attempts && d > 0;
-    }
-
-    void ProgressivelyProjectedNewton::handle_success()
-    {
-        d *= beta;
-        if (curr_attempts > 0)
-        {
-            --curr_attempts;
-        }
-
-    }
     // =======================================================================
 
     void Newton::update_solver_info(json &solver_info, const double per_iteration)

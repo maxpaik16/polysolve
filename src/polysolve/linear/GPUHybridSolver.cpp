@@ -1051,7 +1051,7 @@ namespace polysolve::linear
 
         thrust::device_vector<double> d_log_sorted(n);
         thrust::transform(d_sq_mags.begin(), d_sq_mags.end(), d_log_sorted.begin(), 
-                          [] __device__ (double val) { return log(val); });
+                          [] __device__ (double val) { return ::log(val); });
 
         double min_mag = d_log_sorted.front();
         double max_mag = d_log_sorted.back();

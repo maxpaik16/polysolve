@@ -54,7 +54,6 @@ namespace polysolve::nonlinear
         const double characteristic_length;
         bool use_adaptive_residual_tolerance;
         double residual_tolerance;
-        const NormType norm_type;
 
         std::shared_ptr<polysolve::linear::Solver> linear_solver; ///< Linear solver used to solve the linear system
 
@@ -74,6 +73,7 @@ namespace polysolve::nonlinear
                                      Eigen::MatrixXd &hessian);
 
         Eigen::VectorXd last_residual;
+        const NormType norm_type;
 
     public:
         bool compute_update_direction(Problem &objFunc, const TVector &x, const TVector &grad, TVector &direction) override;
@@ -107,41 +107,6 @@ namespace polysolve::nonlinear
                              const TVector &x,
                              Eigen::MatrixXd &hessian) override;
         bool compare_to_full = false;
-    };
-
-
-    class ProgressivelyProjectedNewton : public Newton
-    {
-    public:
-        using Superclass = Newton;
-
-        ProgressivelyProjectedNewton(const bool sparse,
-                        const json &solver_params,
-                        const json &linear_solver_params,
-                        const double characteristic_length,
-                        spdlog::logger &logger);
-
-        std::string name() const override { return fmt::format("{}ProgressivelyProjectedNewton (d={:g}, attempt={})", internal_name(), d, curr_attempts); }
-
-        void reset(const int ndof) override;
-        bool handle_error() override;
-        void handle_success() override;
-
-    protected:
-        void compute_hessian(Problem &objFunc,
-                             const TVector &x,
-                             polysolve::StiffnessMatrix &hessian) override;
-
-        void compute_hessian(Problem &objFunc,
-                             const TVector &x,
-                             Eigen::MatrixXd &hessian) override;
-
-        bool compare_to_full = false;
-        double alpha = 0.5;
-        double beta = 2;
-        int max_attempts = 10;
-        int curr_attempts = 0;
-        double d = std::numeric_limits<double>::infinity();
     };
 
 

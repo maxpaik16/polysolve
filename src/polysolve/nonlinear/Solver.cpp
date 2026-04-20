@@ -69,10 +69,6 @@ namespace polysolve::nonlinear
             {
                 return std::make_shared<ProjectedNewton>(true, solver_params, linear_solver_params, characteristic_length, logger, norm_type);
             }
-            else if (solver_name == "ProgressivelyProjectedNewton")
-            {
-                return std::make_shared<ProjectedNewton>(true, solver_params, linear_solver_params, characteristic_length, logger);
-            }
             else if (solver_name == "RegularizedNewton")
             {
                 return std::make_shared<RegularizedNewton>(true, false, solver_params, linear_solver_params, characteristic_length, logger, norm_type);
@@ -371,7 +367,7 @@ namespace polysolve::nonlinear
                 update_direction_successful = compute_update_direction(objFunc, x, grad, delta_x);
             }
 
-            m_current.xDelta = objFunc.step_norm(delta_x, norm_type_);
+            m_current.xDelta = objFunc.step_norm(delta_x, m_norm_type);
             if (m_current.iterations == 0)
             {
                 initial_delta_x_norm = m_current.xDelta;

@@ -268,41 +268,6 @@ namespace polysolve::linear
                 Eigen::VectorXd rbm_xy, rbm_zx, rbm_yz;
                 rbm_xy.resize(positions.size());
                 rbm_xy.setZero();
-                
-                if (dim == 3)
-                {
-                    rbm_zx.resize(positions.size());
-                    rbm_yz.resize(positions.size());
-                
-                    rbm_zx.setZero();
-                    rbm_yz.setZero();
-                }
-
-                for (int i = 0; i < positions.rows(); ++i)
-                {
-                    rbm_xy(0 + i*dim) = positions(i, 1);
-                    rbm_xy(1 + i*dim) = -1 * positions(i, 0);
-
-                    if (dim == 3)
-                    {
-                        rbm_zx(1 + i*dim) = positions(i, 2);
-                        rbm_zx(2 + i*dim) = -1 * positions(i, 1);
-
-                        rbm_yz(2 + i*dim) = positions(i, 0);
-                        rbm_yz(0 + i*dim) = -1 * positions(i, 2);
-                    }
-                }
-
-                eigen_to_hypre_par_vec(par_rbms[0], rbms[0], rbm_xy);
-                if (dim == 3)
-                {
-                    eigen_to_hypre_par_vec(par_rbms[1], rbms[1], rbm_zx);
-                    eigen_to_hypre_par_vec(par_rbms[2], rbms[2], rbm_yz);
-                }
-
-                Eigen::VectorXd rbm_xy, rbm_zx, rbm_yz;
-                rbm_xy.resize(positions.size());
-                rbm_xy.setZero();
 
                 if (dim == 3)
                 {
@@ -386,6 +351,7 @@ namespace polysolve::linear
         {
             POLYSOLVE_SCOPED_STOPWATCH("set amg options", set_options_time, *logger);
             HYPRE_BoomerAMGCreate(&precond);
+        }
 
         const int num_rbms = dimension_ == 2 ? 1 : 3;
         std::vector<HYPRE_ParVector> par_rbms(num_rbms);
@@ -428,11 +394,6 @@ namespace polysolve::linear
         hypre_vec_to_eigen(x, result, start_i, end_i);
 
         HYPRE_IJVectorDestroy(x);
-    }
-
-    void HypreSolver::mixed_direct_iterative_solve(const Ref<const VectorXd> b, Ref<VectorXd> x)
-    {
-        
     }
 
     ////////////////////////////////////////////////////////////////////////////////
