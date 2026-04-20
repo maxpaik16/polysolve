@@ -378,8 +378,6 @@
         "optional": [
             "residual_tolerance",
             "use_adaptive_residual_tolerance"
-            "residual_tolerance",
-            "try_neg_eig_dir"
         ],
         "doc": "Options for Newton."
     },
@@ -393,9 +391,6 @@
         "optional": [
             "residual_tolerance",
             "use_adaptive_residual_tolerance"
-            "residual_tolerance",
-            "try_neg_eig_dir",
-            "compare_to_full"
         ],
         "doc": "Options for projected Newton."
     },
@@ -458,8 +453,6 @@
         "optional": [
             "residual_tolerance",
             "use_adaptive_residual_tolerance"
-            "residual_tolerance",
-            "try_neg_eig_dir"
         ],
         "doc": "Options for Newton."
     },
@@ -473,8 +466,6 @@
         "optional": [
             "residual_tolerance",
             "use_adaptive_residual_tolerance"
-            "residual_tolerance",
-            "try_neg_eig_dir"
         ],
         "doc": "Options for projected Newton."
     },
