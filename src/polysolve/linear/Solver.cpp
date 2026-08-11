@@ -63,6 +63,13 @@ namespace polysolve::linear {
 #ifdef POLYSOLVE_WITH_CUSOLVER
 #include "CuSolverDN.cuh"
 #endif
+#ifdef POLYSOLVE_WITH_CUDA
+#include "MASSolver.hpp"
+#include "CUDSS.hpp"
+#include "GPUHybrid.hpp"
+#endif
+#include "Hybrid.hpp"
+
 #include <unsupported/Eigen/IterativeSolvers>
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -399,6 +406,20 @@ namespace polysolve::linear
         {
             return std::make_unique<CuSolverDN<float>>();
 #endif
+#ifdef POLYSOLVE_WITH_CUDA
+        }
+        else if (solver == "MAS")
+        {
+            return std::make_unique<MASSolver>();
+        }
+        else if (solver == "CUDSS")
+        {
+            return std::make_unique<CUDSS>();
+        }
+        else if (solver == "GPUHybrid")
+        {
+            return std::make_unique<GPUHybrid>();
+#endif
 #ifdef POLYSOLVE_WITH_HYPRE
         }
         else if (solver == "Hypre")
@@ -442,6 +463,10 @@ namespace polysolve::linear
         {
             return PrecondHelperSym<MINRES>::create(precond, "Eigen::MINRES");
 #endif
+        }
+        else if (solver == "Hybrid")
+        {
+            return std::make_unique<Hybrid>();
         }
         else if (solver == "SaddlePointSolver")
         {
@@ -531,6 +556,11 @@ namespace polysolve::linear
             "cuSolverDN",
             "cuSolverDN_float",
 #endif
+#ifdef POLYSOLVE_WITH_CUDA
+            "MAS",
+            "CUDSS", 
+            "GPUHybrid",
+#endif
 #ifdef POLYSOLVE_WITH_HYPRE
             "Hypre",
 #endif
@@ -554,7 +584,8 @@ namespace polysolve::linear
             "Eigen::FullPivHouseholderQR",
             "Eigen::CompleteOrthogonalDecomposition",
             "Eigen::LLT",
-            "Eigen::LDLT"
+            "Eigen::LDLT",
+            "Hybrid"
             // "Eigen::BDCSVD",
             // "Eigen::JacobiSVD"
         }};

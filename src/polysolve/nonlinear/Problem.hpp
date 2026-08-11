@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <vector>
+#include <set>
 
 namespace polysolve::nonlinear
 {
@@ -117,6 +118,21 @@ namespace polysolve::nonlinear
 
         virtual double grad_norm(const TVector &grad, const NormType norm_type) const {return grad.norm();}
         virtual double step_norm(const TVector &x, const NormType norm_type) const {return x.norm();}
+
+        virtual void get_problematic_dofs(std::set<int> &bad_dofs) {}
+
+        void set_positions(const Eigen::MatrixXd &positions_)
+        {
+            positions = positions_;
+        }
+
+        void set_elements(const Eigen::MatrixXi &elements_)
+        {
+            elements = elements_;
+        }
+
+        Eigen::MatrixXd positions;
+        Eigen::MatrixXi elements;
 
         /// --- Misc ----------------------------------------------------------
 
