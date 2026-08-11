@@ -146,6 +146,8 @@ namespace polysolve::linear
 
         Eigen::MatrixXd positions_;
         Eigen::MatrixXi elements_;
+
+        std::vector<std::set<int>> contact_patches;
     };
 
 } // namespace polysolve::linear

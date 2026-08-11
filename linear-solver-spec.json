@@ -489,7 +489,8 @@
             "use_incomplete_cholesky_precond",
             "rho",
             "additive_mode",
-            "subdomain_selection_strategy"
+            "subdomain_selection_strategy",
+            "contact_patch_schwarz"
         ],
         "doc": "Settings for the Hybrid solver."
     },
@@ -542,6 +543,12 @@
             "bad_dof_gmm_expand_neighbors"
         ],
         "doc": "Settings for the MAS solver."
+    },
+    {
+        "pointer": "/Hybrid/contact_patch_schwarz",
+        "default": false,
+        "type": "bool",
+        "doc": "Whether or not to use Schwarz on contact patches."
     },
     {
         "pointer": "/Hybrid/additive_mode",

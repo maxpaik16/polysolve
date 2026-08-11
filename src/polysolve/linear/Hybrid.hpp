@@ -183,6 +183,8 @@ namespace polysolve::linear
         Eigen::VectorXd z1, z2, z3;
         Eigen::VectorXd r, p, buffer;
 
+        bool contact_patch_schwarz = false;
+
 #ifdef POLYSOLVE_WITH_ICHOL
         // incomplete cholesky variables
         std::shared_ptr<mschol::ichol_precond> inc_chol_precond; 

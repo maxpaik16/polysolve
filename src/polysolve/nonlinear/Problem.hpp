@@ -133,6 +133,7 @@ namespace polysolve::nonlinear
 
         Eigen::MatrixXd positions;
         Eigen::MatrixXi elements;
+        std::vector<std::set<int>> contact_patches;
 
         /// --- Misc ----------------------------------------------------------
 

@@ -150,6 +150,10 @@ namespace polysolve::linear
             {
                 additive_mode = params["Hybrid"]["additive_mode"];
             }   
+            if (params["Hybrid"].contains("contact_patch_schwarz"))
+            {
+                contact_patch_schwarz = params["Hybrid"]["contact_patch_schwarz"];
+            }
             if (params["Hybrid"].contains("subdomain_selection_strategy"))
             {
                 const std::string strategy_str = params["Hybrid"]["subdomain_selection_strategy"];
@@ -278,6 +282,15 @@ namespace polysolve::linear
             bad_indices_arrays.clear();
             select_bad_dofs(shared_A);
 
+            if (myid == 0 && contact_patch_schwarz)
+            {
+                for (auto patch : contact_patches)
+                {
+                    bad_indices_sets.emplace_back(patch.begin(), patch.end());
+                    bad_indices_arrays.emplace_back(patch.begin(), patch.end());
+                }
+            }
+
             if (myid == 0)
             {
                 if (decompose_subdomains)
@@ -294,7 +307,7 @@ namespace polysolve::linear
                 {
                     decompose_subdomains_to_disjoint_subsets(shared_A);
                 }
-                else 
+                else if (!contact_patch_schwarz)
                 {
                     bad_indices_sets.emplace_back(all_bad_dofs.begin(), all_bad_dofs.end());
                 }
@@ -764,7 +777,15 @@ namespace polysolve::linear
 
             for (int i = 0; i < subdomain.size(); ++i)
             {
-                vec(2 * problem_size + subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                if (contact_patch_scwharz)
+                {
+                    #pragma omp atomic
+                    vec(2 * problem_size + subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                }
+                else
+                {
+                    vec(2 * problem_size + subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                }
             }
             ++index_counter;
         }

@@ -192,6 +192,7 @@ namespace polysolve::nonlinear
             linear_solver->set_problematic_dofs(bad_dofs);
             linear_solver->set_positions(objFunc.positions);
             linear_solver->set_elements(objFunc.elements);
+            linear_solver->contact_patches = objFunc.contact_patches;
 
             linear_solver->analyze_pattern(hessian, hessian.rows());
 
