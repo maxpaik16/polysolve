@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 
 namespace polysolve::nonlinear
 {
@@ -232,6 +233,11 @@ namespace polysolve::nonlinear
             const Eigen::VectorXi block_mapping = objFunc.block_mapping();
             if (block_mapping.size() > 0)
                 linear_solver->set_block_mapping(block_mapping);
+
+            std::set<int> bad_dofs;
+            objFunc.get_problematic_dofs(bad_dofs);
+            linear_solver->set_problematic_dofs(bad_dofs);
+            linear_solver->contact_patches = objFunc.contact_patches;
 
             // TODO: get the correct size
             linear_solver->analyze_pattern(hessian, hessian.rows());

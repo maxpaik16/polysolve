@@ -6,6 +6,7 @@
 #include "PostStepData.hpp"
 
 #include <memory>
+#include <set>
 #include <vector>
 
 namespace polysolve::nonlinear
@@ -44,6 +45,17 @@ namespace polysolve::nonlinear
         /// (the default) means the solver should fall back to its own default
         /// mapping instead of a problem-specific one.
         virtual Eigen::VectorXi block_mapping() const { return Eigen::VectorXi(); }
+
+        /// @brief Report DOFs the linear solver should treat as problematic
+        /// (e.g. poorly conditioned or in contact), letting solvers that support
+        /// externally-driven subdomain selection (e.g. AMGF) use them instead of
+        /// their own row-norm heuristics. Default reports none.
+        virtual void get_problematic_dofs(std::set<int> &bad_dofs) {}
+
+        /// @brief Contact patches (one set of DOFs per patch), passed through to
+        /// Solver::contact_patches for solvers supporting Schwarz-style handling
+        /// of contact DOFs.
+        std::vector<std::set<int>> contact_patches;
 
         /// @brief Initialize the problem.
         /// @param x0 Initial guess.

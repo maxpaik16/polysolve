@@ -3,6 +3,8 @@
 #include <polysolve/Types.hpp>
 
 #include <memory>
+#include <set>
+#include <vector>
 
 #define POLYSOLVE_DELETE_MOVE_COPY(Base) \
     Base(Base &&) = delete;              \
@@ -120,6 +122,15 @@ namespace polysolve::linear
 
         /// Set solver tolerance
         virtual void set_tolerance(const double tol) {}
+
+        /// Set the set of DOFs flagged as problematic (e.g. poorly conditioned or
+        /// in contact), letting a caller drive subdomain selection instead of the
+        /// solver's own heuristics.
+        virtual void set_problematic_dofs(const std::set<int> &bad_dofs) {}
+
+        /// Contact patches (e.g. one per contact pair), used by solvers that
+        /// support Schwarz-style overlapping subdomain treatment of contact DOFs.
+        std::vector<std::set<int>> contact_patches;
 
         ///
         /// @brief         { Solve the linear system Ax = b }
