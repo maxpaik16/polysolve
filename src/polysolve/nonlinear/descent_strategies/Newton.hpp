@@ -18,7 +18,8 @@ namespace polysolve::nonlinear
             const json &linear_solver_params,
             const double characteristic_length,
             spdlog::logger &logger,
-            const NormType norm_type);
+            const NormType norm_type,
+            const int dimension = 1);
 
     protected:
         Newton(const bool sparse,
@@ -27,7 +28,8 @@ namespace polysolve::nonlinear
                const json &linear_solver_params,
                const double characteristic_length,
                spdlog::logger &logger,
-               const NormType norm_type);
+               const NormType norm_type,
+               const int dimension = 1);
 
     public:
         Newton(const bool sparse,
@@ -35,7 +37,8 @@ namespace polysolve::nonlinear
                const json &linear_solver_params,
                const double characteristic_length,
                spdlog::logger &logger,
-               const NormType norm_type);
+               const NormType norm_type,
+               const int dimension = 1);
 
         std::string name() const override { return internal_name() + "Newton"; }
 
@@ -93,7 +96,8 @@ namespace polysolve::nonlinear
                         const json &linear_solver_params,
                         const double characteristic_length,
                         spdlog::logger &logger,
-                        const NormType norm_type);
+                        const NormType norm_type,
+                        const int dimension = 1);
 
         std::string name() const override { return internal_name() + "ProjectedNewton"; }
 
@@ -117,7 +121,8 @@ namespace polysolve::nonlinear
                           const json &linear_solver_params,
                           const double characteristic_length,
                           spdlog::logger &logger,
-                          const NormType norm_type);
+                          const NormType norm_type,
+                          const int dimension = 1);
 
         std::string name() const override
         {
