@@ -5,7 +5,10 @@
 
 #include "hybrid_utils/DisjointSet.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
+#include <limits>
 
 #include <HYPRE_utilities.h>
 #include <Eigen/SparseCholesky>
@@ -167,6 +170,42 @@ namespace polysolve::linear
             {
                 additive_mode = shared_params["CPUHybrid"]["additive_mode"];
             }
+            if (shared_params["CPUHybrid"].contains("select_bad_dofs_from_l1_norm"))
+            {
+                select_bad_dofs_from_l1_row_norm = shared_params["CPUHybrid"]["select_bad_dofs_from_l1_norm"];
+            }
+            if (shared_params["CPUHybrid"].contains("subdomain_selection_strategy"))
+            {
+                const std::string strategy_str = shared_params["CPUHybrid"]["subdomain_selection_strategy"];
+                if (strategy_str == "knee")
+                {
+                    subdomain_selection_strategy = SubdomainSelectionStrategy::KNEE;
+                }
+                else if (strategy_str == "gmm")
+                {
+                    subdomain_selection_strategy = SubdomainSelectionStrategy::GMM;
+                }
+                else if (strategy_str == "fd")
+                {
+                    subdomain_selection_strategy = SubdomainSelectionStrategy::FD;
+                }
+                else if (strategy_str == "cost")
+                {
+                    subdomain_selection_strategy = SubdomainSelectionStrategy::COST;
+                }
+                else if (strategy_str == "aposteriori")
+                {
+                    subdomain_selection_strategy = SubdomainSelectionStrategy::APOSTERIORI;
+                }
+                else
+                {
+                    throw std::runtime_error("Unknown subdomain selection strategy: " + strategy_str);
+                }
+            }
+            if (shared_params["CPUHybrid"].contains("contact_patch_schwarz"))
+            {
+                contact_patch_schwarz = shared_params["CPUHybrid"]["contact_patch_schwarz"];
+            }
         }
     }
 
@@ -216,6 +255,11 @@ namespace polysolve::linear
         if (myid != 0)
         {
             return;
+        }
+
+        if (subdomain_selection_strategy == SubdomainSelectionStrategy::APOSTERIORI)
+        {
+            throw std::runtime_error("A Posteriori subdomain selection strategy is not yet implemented!");
         }
     }
 
@@ -302,6 +346,15 @@ namespace polysolve::linear
         bad_indices_arrays.clear();
         select_bad_dofs(shared_A);
 
+        if (myid == 0 && contact_patch_schwarz)
+        {
+            for (const auto &patch : contact_patches)
+            {
+                bad_indices_sets.emplace_back(patch.begin(), patch.end());
+                bad_indices_arrays.emplace_back(patch.begin(), patch.end());
+            }
+        }
+
         if (myid == 0)
         {
             if (decompose_subdomains)
@@ -318,7 +371,7 @@ namespace polysolve::linear
             {
                 decompose_subdomains_to_disjoint_subsets(shared_A);
             }
-            else
+            else if (!contact_patch_schwarz)
             {
                 bad_indices_sets.emplace_back(all_bad_dofs.begin(), all_bad_dofs.end());
             }
@@ -764,7 +817,17 @@ namespace polysolve::linear
 
             for (int i = 0; i < subdomain.size(); ++i)
             {
-                vec(2 * problem_size + subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                if (contact_patch_schwarz)
+                {
+                    // Contact patches may overlap, so accumulate rather than
+                    // overwrite (additive Schwarz).
+                    #pragma omp atomic
+                    vec(2 * problem_size + subdomain[i]) += sub_result(index_mappings[index_counter][subdomain[i]]);
+                }
+                else
+                {
+                    vec(2 * problem_size + subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                }
             }
             ++index_counter;
         }
@@ -783,6 +846,13 @@ namespace polysolve::linear
     void CPUHybridSolver::select_bad_dofs(SharedSparseMatrix &sparse_A)
     {
         auto phase_begin = clock::now();
+
+        if (!select_bad_dofs_from_l1_row_norm)
+        {
+            // AMGF mode: bad DOFs come only from set_problematic_dofs (and,
+            // if enabled, contact_patch_schwarz), not from this heuristic.
+            return;
+        }
 
         MPI_Win row_norm_win;
         int local_alloc_size = (myid == 0) ? (sparse_A.rows() * sizeof(double)) : 0;
@@ -827,96 +897,214 @@ namespace polysolve::linear
         double min_cost = -1.0;
         int split_idx = 0;
 
-        MPI_Win gamma_win;
-        void *gamma_ptr;
-        MPI_Win_allocate_shared(2 * local_alloc_size, 1, MPI_INFO_NULL, MPI_COMM_WORLD, &gamma_ptr, &gamma_win);
-        if (myid != 0)
+        switch (subdomain_selection_strategy)
         {
-            int disp_unit;
-            MPI_Aint sz;
-            MPI_Win_shared_query(gamma_win, 0, &sz, &disp_unit, &gamma_ptr);
-        }
-
-        SharedVector gamma((double *)gamma_ptr, 2 * sparse_A.rows());
-
-        mean_0 = row_norms.minCoeff();
-        var_0 = global_var;
-        mean_1 = row_norms.maxCoeff();
-        var_1 = global_var;
-        double w0 = 0.5;
-        double w1 = 0.5;
-        double var_reg = 1e-6;
-
-        for (gmm_iter = 0; gmm_iter < max_gmm_iterations; ++gmm_iter)
+        case SubdomainSelectionStrategy::KNEE:
+        case SubdomainSelectionStrategy::FD:
+        case SubdomainSelectionStrategy::COST:
         {
-            double log_w0 = std::log(w0);
-            double log_w1 = std::log(w1);
-            double log_norm_const_0 = -0.5 * std::log(2.0 * M_PI * var_0);
-            double log_norm_const_1 = -0.5 * std::log(2.0 * M_PI * var_1);
-
-            auto x = row_norms.segment(starts[myid], my_size()).array();
-
-            Eigen::ArrayXd log_g0 = log_w0 + log_norm_const_0 - 0.5 * (x - mean_0).square() / var_0;
-            Eigen::ArrayXd log_g1 = log_w1 + log_norm_const_1 - 0.5 * (x - mean_1).square() / var_1;
-            Eigen::ArrayXd max_log_g = log_g0.cwiseMax(log_g1);
-            Eigen::ArrayXd log_total = max_log_g + ((log_g0 - max_log_g).exp() + (log_g1 - max_log_g).exp()).log();
-
-            MPI_Win_fence(0, gamma_win);
-            gamma.segment(starts[myid], my_size()).array() = (log_g0 - log_total).exp();
-            gamma.segment(starts[myid] + row_norms.size(), my_size()).array() = (log_g1 - log_total).exp();
-            MPI_Win_fence(0, gamma_win);
-
-            w0 = 1.0 / row_norms.size() * gamma.segment(starts[myid], my_size()).sum();
-            w1 = 1.0 / row_norms.size() * gamma.segment(starts[myid] + row_norms.size(), my_size()).sum();
-
-            MPI_Allreduce(MPI_IN_PLACE, &w0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            MPI_Allreduce(MPI_IN_PLACE, &w1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-            double old_mean_0 = mean_0;
-            double old_mean_1 = mean_1;
-            double old_var_0 = var_0;
-            double old_var_1 = var_1;
-
-            mean_0 = (row_norms.segment(starts[myid], my_size()).array() * gamma.segment(starts[myid], my_size()).array()).sum() / (w0 * row_norms.size());
-            mean_1 = (row_norms.segment(starts[myid], my_size()).array() * gamma.segment(starts[myid] + row_norms.size(), my_size()).array()).sum() / (w1 * row_norms.size());
-
-            MPI_Allreduce(MPI_IN_PLACE, &mean_0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            MPI_Allreduce(MPI_IN_PLACE, &mean_1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-            var_0 = (gamma.segment(starts[myid], my_size()).array() * (row_norms.segment(starts[myid], my_size()).array() - mean_0).square()).sum() / (w0 * row_norms.size());
-            var_1 = (gamma.segment(starts[myid] + row_norms.size(), my_size()).array() * (row_norms.segment(starts[myid], my_size()).array() - mean_1).square()).sum() / (w1 * row_norms.size());
-
-            MPI_Allreduce(MPI_IN_PLACE, &var_0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            MPI_Allreduce(MPI_IN_PLACE, &var_1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-            var_0 += var_reg;
-            var_1 += var_reg;
-
-            if (std::abs(mean_0 - old_mean_0) / std::abs(old_mean_0) < gmm_tol && std::abs(mean_1 - old_mean_1) / std::abs(old_mean_1) < gmm_tol && std::abs(var_0 - old_var_0) / std::abs(old_var_0) < gmm_tol && std::abs(var_1 - old_var_1) / std::abs(old_var_1) < gmm_tol)
+            if (myid == 0)
             {
-                break;
-            }
-        }
-
-        if (myid == 0)
-        {
-            if (std::abs(mean_1) / std::abs(mean_0) > gmm_jump_threshold)
-            {
+                std::vector<std::pair<double, int>> sorted_norms;
+                sorted_norms.reserve(row_norms.size());
                 for (int i = 0; i < row_norms.size(); ++i)
                 {
-                    if (gamma(i) < gamma(i + row_norms.size()))
+                    sorted_norms.push_back({row_norms(i), i});
+                }
+
+                std::sort(sorted_norms.begin(), sorted_norms.end());
+                int N = sorted_norms.size();
+
+                if (N >= 2)
+                {
+                    if (subdomain_selection_strategy == SubdomainSelectionStrategy::KNEE)
                     {
-                        all_bad_dofs.insert(i);
+                        double x1 = 0.0;
+                        double y1 = std::log(sorted_norms[0].first + 1e-12);
+                        double x2 = N - 1.0;
+                        double y2 = std::log(sorted_norms[N - 1].first + 1e-12);
+
+                        for (int i = 1; i < N - 1; ++i)
+                        {
+                            double x0 = (double)i;
+                            double y0 = std::log(sorted_norms[i].first + 1e-12);
+
+                            double dist = std::abs((y2 - y1) * x0 - (x2 - x1) * y0 + x2 * y1 - y2 * x1);
+
+                            if (dist > max_dist)
+                            {
+                                max_dist = dist;
+                                split_idx = i;
+                            }
+                        }
+                    }
+                    else if (subdomain_selection_strategy == SubdomainSelectionStrategy::FD)
+                    {
+                        for (int i = 1; i < N; ++i)
+                        {
+                            double jump = sorted_norms[i].first - sorted_norms[i - 1].first;
+                            if (jump > max_jump)
+                            {
+                                max_jump = jump;
+                                split_idx = i;
+                            }
+                        }
+                    }
+                    else if (subdomain_selection_strategy == SubdomainSelectionStrategy::COST)
+                    {
+                        // TODO: Migrate these to class variables later
+                        const double c_pcg_conv = 1.0;
+                        const double c_pcg = 1.0;
+                        const double c_fac = 1.0;
+                        const double c_solve = 1.0;
+
+                        min_cost = std::numeric_limits<double>::max();
+
+                        double lambda_min = sorted_norms[0].first;
+
+                        for (int i = 0; i < N; ++i)
+                        {
+                            double p = static_cast<double>(N - i);
+                            double lambda_max = sorted_norms[i].first;
+
+                            double m = c_pcg_conv * std::sqrt(lambda_max / lambda_min);
+                            double cost = (m * c_pcg * N) +
+                                          (c_fac * p * p) +
+                                          (m * c_solve * std::pow(p, 4.0 / 3.0));
+
+                            if (cost < min_cost)
+                            {
+                                min_cost = cost;
+                                split_idx = i;
+                            }
+                        }
+                    }
+
+                    for (int i = split_idx; i < N; ++i)
+                    {
+                        all_bad_dofs.insert(sorted_norms[i].second);
                     }
                 }
             }
+            break;
+        }
+        case SubdomainSelectionStrategy::GMM:
+        {
+            MPI_Win gamma_win;
+            void *gamma_ptr;
+            MPI_Win_allocate_shared(2 * local_alloc_size, 1, MPI_INFO_NULL, MPI_COMM_WORLD, &gamma_ptr, &gamma_win);
+            if (myid != 0)
+            {
+                int disp_unit;
+                MPI_Aint sz;
+                MPI_Win_shared_query(gamma_win, 0, &sz, &disp_unit, &gamma_ptr);
+            }
+
+            SharedVector gamma((double *)gamma_ptr, 2 * sparse_A.rows());
+
+            mean_0 = row_norms.minCoeff();
+            var_0 = global_var;
+            mean_1 = row_norms.maxCoeff();
+            var_1 = global_var;
+            double w0 = 0.5;
+            double w1 = 0.5;
+            double var_reg = 1e-6;
+
+            for (gmm_iter = 0; gmm_iter < max_gmm_iterations; ++gmm_iter)
+            {
+                double log_w0 = std::log(w0);
+                double log_w1 = std::log(w1);
+                double log_norm_const_0 = -0.5 * std::log(2.0 * M_PI * var_0);
+                double log_norm_const_1 = -0.5 * std::log(2.0 * M_PI * var_1);
+
+                auto x = row_norms.segment(starts[myid], my_size()).array();
+
+                Eigen::ArrayXd log_g0 = log_w0 + log_norm_const_0 - 0.5 * (x - mean_0).square() / var_0;
+                Eigen::ArrayXd log_g1 = log_w1 + log_norm_const_1 - 0.5 * (x - mean_1).square() / var_1;
+                Eigen::ArrayXd max_log_g = log_g0.cwiseMax(log_g1);
+                Eigen::ArrayXd log_total = max_log_g + ((log_g0 - max_log_g).exp() + (log_g1 - max_log_g).exp()).log();
+
+                MPI_Win_fence(0, gamma_win);
+                gamma.segment(starts[myid], my_size()).array() = (log_g0 - log_total).exp();
+                gamma.segment(starts[myid] + row_norms.size(), my_size()).array() = (log_g1 - log_total).exp();
+                MPI_Win_fence(0, gamma_win);
+
+                w0 = 1.0 / row_norms.size() * gamma.segment(starts[myid], my_size()).sum();
+                w1 = 1.0 / row_norms.size() * gamma.segment(starts[myid] + row_norms.size(), my_size()).sum();
+
+                MPI_Allreduce(MPI_IN_PLACE, &w0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                MPI_Allreduce(MPI_IN_PLACE, &w1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+                double old_mean_0 = mean_0;
+                double old_mean_1 = mean_1;
+                double old_var_0 = var_0;
+                double old_var_1 = var_1;
+
+                mean_0 = (row_norms.segment(starts[myid], my_size()).array() * gamma.segment(starts[myid], my_size()).array()).sum() / (w0 * row_norms.size());
+                mean_1 = (row_norms.segment(starts[myid], my_size()).array() * gamma.segment(starts[myid] + row_norms.size(), my_size()).array()).sum() / (w1 * row_norms.size());
+
+                MPI_Allreduce(MPI_IN_PLACE, &mean_0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                MPI_Allreduce(MPI_IN_PLACE, &mean_1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+                var_0 = (gamma.segment(starts[myid], my_size()).array() * (row_norms.segment(starts[myid], my_size()).array() - mean_0).square()).sum() / (w0 * row_norms.size());
+                var_1 = (gamma.segment(starts[myid] + row_norms.size(), my_size()).array() * (row_norms.segment(starts[myid], my_size()).array() - mean_1).square()).sum() / (w1 * row_norms.size());
+
+                MPI_Allreduce(MPI_IN_PLACE, &var_0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                MPI_Allreduce(MPI_IN_PLACE, &var_1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+                var_0 += var_reg;
+                var_1 += var_reg;
+
+                if (std::abs(mean_0 - old_mean_0) / std::abs(old_mean_0) < gmm_tol && std::abs(mean_1 - old_mean_1) / std::abs(old_mean_1) < gmm_tol && std::abs(var_0 - old_var_0) / std::abs(old_var_0) < gmm_tol && std::abs(var_1 - old_var_1) / std::abs(old_var_1) < gmm_tol)
+                {
+                    break;
+                }
+            }
+
+            if (myid == 0)
+            {
+                if (std::abs(mean_1) / std::abs(mean_0) > gmm_jump_threshold)
+                {
+                    for (int i = 0; i < row_norms.size(); ++i)
+                    {
+                        if (gamma(i) < gamma(i + row_norms.size()))
+                        {
+                            all_bad_dofs.insert(i);
+                        }
+                    }
+                }
+            }
+
+            MPI_Win_free(&gamma_win);
+            break;
+        }
+        case SubdomainSelectionStrategy::APOSTERIORI:
+            break;
         }
 
-        MPI_Win_free(&gamma_win);
         MPI_Win_free(&row_norm_win);
 
-        SPDLOG_TRACE("[{}] [bad_dof_selection] [{}] [strategy=GMM] [global_mean={}] [global_var={}] [mean_0={}] [mean_1={}] [var_0={}] [var_1={}] [gmm_iters={}] [num_bad_dofs={}]",
-                     name(), elapsed_seconds(phase_begin), global_mean, global_var, mean_0, mean_1, var_0, var_1, gmm_iter, all_bad_dofs.size());
+        switch (subdomain_selection_strategy)
+        {
+        case SubdomainSelectionStrategy::KNEE:
+            SPDLOG_TRACE("[{}] [bad_dof_selection] [{}] [strategy=KNEE] [global_mean={}] [global_var={}] [split_idx={}] [max_dist={}] [num_bad_dofs={}]",
+                         name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, max_dist, all_bad_dofs.size());
+            break;
+        case SubdomainSelectionStrategy::FD:
+            SPDLOG_TRACE("[{}] [bad_dof_selection] [{}] [strategy=FD] [global_mean={}] [global_var={}] [split_idx={}] [max_jump={}] [num_bad_dofs={}]",
+                         name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, max_jump, all_bad_dofs.size());
+            break;
+        case SubdomainSelectionStrategy::COST:
+            SPDLOG_TRACE("[{}] [bad_dof_selection] [{}] [strategy=COST] [global_mean={}] [global_var={}] [split_idx={}] [min_cost={}] [num_bad_dofs={}]",
+                         name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, min_cost, all_bad_dofs.size());
+            break;
+        case SubdomainSelectionStrategy::GMM:
+            SPDLOG_TRACE("[{}] [bad_dof_selection] [{}] [strategy=GMM] [global_mean={}] [global_var={}] [mean_0={}] [mean_1={}] [var_0={}] [var_1={}] [gmm_iters={}] [num_bad_dofs={}]",
+                         name(), elapsed_seconds(phase_begin), global_mean, global_var, mean_0, mean_1, var_0, var_1, gmm_iter, all_bad_dofs.size());
+            break;
+        case SubdomainSelectionStrategy::APOSTERIORI:
+            break;
+        }
     }
 
     void CPUHybridSolver::factorize_submatrix(SharedSparseMatrix &sparse_A)

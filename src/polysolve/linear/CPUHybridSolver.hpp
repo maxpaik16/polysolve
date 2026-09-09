@@ -126,14 +126,32 @@ namespace polysolve::linear
         // Name of the solver type (for debugging purposes)
         virtual std::string name() const override
         {
-            return "CPUHybrid";
+            return select_bad_dofs_from_l1_row_norm ? "CPUHybrid" : "CPUAMGF";
         }
+
+        virtual void set_problematic_dofs(const std::set<int> &bad_dofs) override { all_bad_dofs = bad_dofs; }
+
+        // Alternative strategies for picking which DOFs get the dense/direct
+        // subdomain treatment, in place of the default GMM row-norm clustering.
+        enum class SubdomainSelectionStrategy
+        {
+            KNEE,
+            GMM,
+            FD,
+            COST,
+            APOSTERIORI
+        };
 
     protected:
         // AMG settings
         double theta = 0.5;
 
         // Hybrid preconditioner settings
+        // When false, bad DOFs are taken only from whatever set_problematic_dofs
+        // (and, if enabled, contact_patch_schwarz) supplies instead of being
+        // inferred from the row-norm heuristic below (AMGF mode).
+        bool select_bad_dofs_from_l1_row_norm = true;
+        SubdomainSelectionStrategy subdomain_selection_strategy = SubdomainSelectionStrategy::GMM;
         bool decompose_subdomains = true;
         int min_subdomain_size = 3;
         int max_subdomain_size = 1e9;
@@ -142,6 +160,9 @@ namespace polysolve::linear
         int max_gmm_iterations = 20;
         bool expand_subdomains = true;
         bool additive_mode = false;
+        // Give each contact patch its own (possibly overlapping) subdomain,
+        // solved additively -- an additive Schwarz treatment of contact DOFs.
+        bool contact_patch_schwarz = false;
 
         // General solver settings
         int dimension_ = 1; // 1 = scalar (Laplace), 2 or 3 = vector (Elasticity)
