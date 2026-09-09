@@ -509,7 +509,10 @@
             "gmm_tol",
             "max_gmm_iterations",
             "conditioning_threshold",
-            "additive_mode"
+            "additive_mode",
+            "select_bad_dofs_from_l1_norm",
+            "subdomain_selection_strategy",
+            "contact_patch_schwarz"
         ],
         "doc": "Settings for the CPUHybrid solver."
     },
@@ -592,6 +595,31 @@
         "doc": "Apply subspace correction additively. "
     },
     {
+        "pointer": "/CPUHybrid/select_bad_dofs_from_l1_norm",
+        "default": true,
+        "type": "bool",
+        "doc": "Select the problematic subspace from the L1 row norm heuristic. If false (AMGF mode), the problematic subspace is taken only from set_problematic_dofs (and, if enabled, contact_patch_schwarz) instead."
+    },
+    {
+        "pointer": "/CPUHybrid/subdomain_selection_strategy",
+        "default": "gmm",
+        "type": "string",
+        "options": [
+            "knee",
+            "gmm",
+            "fd",
+            "cost",
+            "aposteriori"
+        ],
+        "doc": "Strategy used to threshold row norms into the problematic subspace: gmm (Gaussian mixture model), knee (max-distance-to-chord knee point), fd (largest finite-difference jump), cost (minimize estimated solve cost), or aposteriori (not yet implemented)."
+    },
+    {
+        "pointer": "/CPUHybrid/contact_patch_schwarz",
+        "default": false,
+        "type": "bool",
+        "doc": "Additionally give each contact patch (see Solver::contact_patches) its own overlapping subdomain, combined additively (Schwarz) with the rest of the problematic subspace."
+    },
+    {
         "pointer": "/GPUHybrid",
         "default": null,
         "type": "object",
@@ -608,7 +636,9 @@
             "gmm_tol",
             "max_gmm_iterations",
             "conditioning_threshold",
-            "additive_mode"
+            "additive_mode",
+            "select_bad_dofs_from_l1_norm",
+            "subdomain_selection_strategy"
         ],
         "doc": "Settings for the GPUHybrid solver."
     },
@@ -689,5 +719,24 @@
         "default": false,
         "type": "bool",
         "doc": "Apply subspace correction additively. "
+    },
+    {
+        "pointer": "/GPUHybrid/select_bad_dofs_from_l1_norm",
+        "default": true,
+        "type": "bool",
+        "doc": "Select the problematic subspace from the L1 row norm heuristic. If false (AMGF mode), the problematic subspace is taken only from set_problematic_dofs instead."
+    },
+    {
+        "pointer": "/GPUHybrid/subdomain_selection_strategy",
+        "default": "gmm",
+        "type": "string",
+        "options": [
+            "knee",
+            "gmm",
+            "fd",
+            "cost",
+            "aposteriori"
+        ],
+        "doc": "Strategy used to threshold row norms into the problematic subspace: gmm (Gaussian mixture model), knee (max-distance-to-chord knee point), fd (largest finite-difference jump), cost (minimize estimated solve cost), or aposteriori (not yet implemented)."
     }
 ]
