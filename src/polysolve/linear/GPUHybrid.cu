@@ -178,6 +178,35 @@ namespace polysolve::linear
             if (params["GPUHybrid"].contains("additive_mode"))
             {
                 additive_mode = params["GPUHybrid"]["additive_mode"];
+            }
+            if (params["GPUHybrid"].contains("subdomain_selection_strategy"))
+            {
+                const std::string strategy_str = params["GPUHybrid"]["subdomain_selection_strategy"];
+                if (strategy_str == "knee")
+                {
+                    subdomain_selection_strategy = GPUHybrid::SubdomainSelectionStrategy::KNEE;
+                }
+                else if (strategy_str == "gmm")
+                {
+                    subdomain_selection_strategy = GPUHybrid::SubdomainSelectionStrategy::GMM;
+                }
+                else if (strategy_str == "fd")
+                {
+                    subdomain_selection_strategy = GPUHybrid::SubdomainSelectionStrategy::FD;
+                }
+                else if (strategy_str == "cost")
+                {
+                    subdomain_selection_strategy = GPUHybrid::SubdomainSelectionStrategy::COST;
+                }
+                else if (strategy_str == "aposteriori")
+                {
+                    subdomain_selection_strategy = GPUHybrid::SubdomainSelectionStrategy::APOSTERIORI;
+
+                }
+                else
+                {
+                    throw std::runtime_error("Invalid subdomain selection strategy: " + strategy_str);
+                }
             }      
         }
     } 
@@ -786,112 +815,242 @@ namespace polysolve::linear
         );
         double global_var = var_sum / num_rows;
 
-        auto minmax = thrust::minmax_element(d_row_norms.begin(), d_row_norms.end());
-        double mean_0 = *minmax.first;
-        double mean_1 = *minmax.second;
-        double var_0 = global_var;
-        double var_1 = global_var;
-        double w0 = 0.5;
-        double w1 = 0.5;
+        h_all_bad_dofs.clear();
 
-        double var_reg = 1e-6;
+        double mean_0 = 0.0, mean_1 = 0.0;
+        double var_0 = 0.0, var_1 = 0.0;
+        int gmm_iter = 0;
+        
+        double max_dist = -1.0;
+        double max_jump = -1.0;
+        double min_cost = -1.0; 
+        int split_idx = 0;
 
-        thrust::device_vector<double> d_gamma0(num_rows);
-        thrust::device_vector<double> d_gamma1(num_rows);
-        double* g0 = thrust::raw_pointer_cast(d_gamma0.data());
-        double* g1 = thrust::raw_pointer_cast(d_gamma1.data());
-
-        double log_likelihood = 0.0;
-        int gmm_iter;
-
-        for (gmm_iter = 0; gmm_iter < max_gmm_iterations; ++gmm_iter) {
-            
-            log_likelihood = thrust::transform_reduce(thrust::device,
-                thrust::make_counting_iterator(0),
-                thrust::make_counting_iterator(num_rows),
-                [=] __device__ (int i) -> double {
-                    double x = row_norms[i];
-
-                    double log_w0 = log(w0);
-                    double log_w1 = log(w1);
-                    
-                    double log_N0 = -0.5 * log(2.0 * M_PI * var_0) - 0.5 * (x - mean_0) * (x - mean_0) / var_0;
-                    double log_N1 = -0.5 * log(2.0 * M_PI * var_1) - 0.5 * (x - mean_1) * (x - mean_1) / var_1;
-                    
-                    double log_g0 = log_w0 + log_N0;
-                    double log_g1 = log_w1 + log_N1;
-                    
-                    double max_log_g = max(log_g0, log_g1);
-                    double log_total = max_log_g + log(exp(log_g0 - max_log_g) + exp(log_g1 - max_log_g));
-                    
-                    g0[i] = exp(log_g0 - log_total);
-                    g1[i] = exp(log_g1 - log_total);
-
-                    return log_total; 
-                },
-                0.0, thrust::plus<double>()
-            );
-
-            double sum_g0 = thrust::reduce(d_gamma0.begin(), d_gamma0.end(), 0.0);
-            double sum_g1 = thrust::reduce(d_gamma1.begin(), d_gamma1.end(), 0.0);
-
-            w0 = sum_g0 / num_rows;
-            w1 = sum_g1 / num_rows;
-
-            double old_mean_0 = mean_0, old_mean_1 = mean_1;
-            double old_var_0 = var_0, old_var_1 = var_1;
-
-            mean_0 = thrust::inner_product(d_gamma0.begin(), d_gamma0.end(), d_row_norms.begin(), 0.0) / sum_g0;
-            mean_1 = thrust::inner_product(d_gamma1.begin(), d_gamma1.end(), d_row_norms.begin(), 0.0) / sum_g1;
-
-            var_0 = thrust::transform_reduce(thrust::device,
-                thrust::make_counting_iterator(0),
-                thrust::make_counting_iterator(num_rows),
-                [=] __device__ (int i) -> double { return g0[i] * (row_norms[i] - mean_0) * (row_norms[i] - mean_0); },
-                0.0, thrust::plus<double>()
-            ) / sum_g0 + var_reg;
-
-            var_1 = thrust::transform_reduce(thrust::device,
-                thrust::make_counting_iterator(0),
-                thrust::make_counting_iterator(num_rows),
-                [=] __device__ (int i) -> double { return g1[i] * (row_norms[i] - mean_1) * (row_norms[i] - mean_1); },
-                0.0, thrust::plus<double>()
-            ) / sum_g1 + var_reg;
-
-            // Check Convergence
-            if (abs(mean_0 - old_mean_0) / abs(old_mean_0) < gmm_tol && 
-                abs(mean_1 - old_mean_1) / abs(old_mean_1) < gmm_tol && 
-                abs(var_0 - old_var_0) / abs(old_var_0) < gmm_tol && 
-                abs(var_1 - old_var_1) / abs(old_var_1) < gmm_tol) 
+        switch (subdomain_selection_strategy)
+        {
+            case SubdomainSelectionStrategy::KNEE:
+            case SubdomainSelectionStrategy::FD:
+            case SubdomainSelectionStrategy::COST:
             {
+                // Sort on GPU, preserving original row indices
+                thrust::device_vector<double> d_sorted_norms = d_row_norms;
+                thrust::device_vector<int> d_indices(num_rows);
+                thrust::sequence(d_indices.begin(), d_indices.end());
+
+                thrust::sort_by_key(d_sorted_norms.begin(), d_sorted_norms.end(), d_indices.begin());
+
+                // Bring sorted data back to Host for O(N) linear scanning
+                std::vector<double> h_sorted_norms(num_rows);
+                std::vector<int> h_indices(num_rows);
+                
+                thrust::copy(d_sorted_norms.begin(), d_sorted_norms.end(), h_sorted_norms.begin());
+                thrust::copy(d_indices.begin(), d_indices.end(), h_indices.begin());
+
+                int N = num_rows;
+                if (N >= 2)
+                {
+                    if (subdomain_selection_strategy == SubdomainSelectionStrategy::KNEE)
+                    {
+                        double x1 = 0.0;
+                        double y1 = std::log(h_sorted_norms[0] + 1e-12);
+                        double x2 = N - 1.0;
+                        double y2 = std::log(h_sorted_norms[N - 1] + 1e-12);
+
+                        for (int i = 1; i < N - 1; ++i)
+                        {
+                            double x0 = (double)i;
+                            double y0 = std::log(h_sorted_norms[i] + 1e-12);
+                            
+                            double dist = std::abs((y2 - y1)*x0 - (x2 - x1)*y0 + x2*y1 - y2*x1);
+                            
+                            if (dist > max_dist)
+                            {
+                                max_dist = dist;
+                                split_idx = i;
+                            }
+                        }
+                    }
+                    else if (subdomain_selection_strategy == SubdomainSelectionStrategy::FD)
+                    {
+                        for (int i = 1; i < N; ++i)
+                        {
+                            double jump = h_sorted_norms[i] - h_sorted_norms[i - 1];
+                            if (jump > max_jump)
+                            {
+                                max_jump = jump;
+                                split_idx = i;
+                            }
+                        }
+                    }
+                    else if (subdomain_selection_strategy == SubdomainSelectionStrategy::COST)
+                    {
+                        const double c_pcg_conv = 1.0;
+                        const double c_pcg = 1.0;
+                        const double c_fac = 1.0;
+                        const double c_solve = 1.0;
+
+                        min_cost = std::numeric_limits<double>::max();
+                        
+                        double lambda_min = h_sorted_norms[0]; 
+
+                        for (int i = 0; i < N; ++i)
+                        {
+                            double p = static_cast<double>(N - i);
+                            double lambda_max = h_sorted_norms[i];
+                            
+                            double m = c_pcg_conv * std::sqrt(lambda_max / lambda_min);
+                            double cost = (m * c_pcg * N) + 
+                                        (c_fac * p * p) + 
+                                        (m * c_solve * std::pow(p, 4.0 / 3.0));
+                            
+                            if (cost < min_cost)
+                            {
+                                min_cost = cost;
+                                split_idx = i;
+                            }
+                        }
+                    }
+
+                    // Populate Host & Device Bad DoFs
+                    std::vector<int> h_bad_dofs;
+                    h_bad_dofs.reserve(N - split_idx);
+
+                    for (int i = split_idx; i < N; ++i)
+                    {
+                        h_all_bad_dofs.insert(h_indices[i]);
+                        h_bad_dofs.push_back(h_indices[i]);
+                    }
+                    
+                    d_all_bad_dofs = h_bad_dofs; // Push results back to device
+                }
+                break;
+            }
+            case SubdomainSelectionStrategy::GMM:
+            {
+                auto minmax = thrust::minmax_element(d_row_norms.begin(), d_row_norms.end());
+                mean_0 = *minmax.first;
+                mean_1 = *minmax.second;
+                var_0 = global_var;
+                var_1 = global_var;
+                double w0 = 0.5;
+                double w1 = 0.5;
+
+                double var_reg = 1e-6;
+
+                thrust::device_vector<double> d_gamma0(num_rows);
+                thrust::device_vector<double> d_gamma1(num_rows);
+                double* g0 = thrust::raw_pointer_cast(d_gamma0.data());
+                double* g1 = thrust::raw_pointer_cast(d_gamma1.data());
+
+                double log_likelihood = 0.0;
+
+                for (gmm_iter = 0; gmm_iter < max_gmm_iterations; ++gmm_iter) {
+                    
+                    log_likelihood = thrust::transform_reduce(thrust::device,
+                        thrust::make_counting_iterator(0),
+                        thrust::make_counting_iterator(num_rows),
+                        [=] __device__ (int i) -> double {
+                            double x = row_norms[i];
+
+                            double log_w0 = log(w0);
+                            double log_w1 = log(w1);
+                            
+                            double log_N0 = -0.5 * log(2.0 * M_PI * var_0) - 0.5 * (x - mean_0) * (x - mean_0) / var_0;
+                            double log_N1 = -0.5 * log(2.0 * M_PI * var_1) - 0.5 * (x - mean_1) * (x - mean_1) / var_1;
+                            
+                            double log_g0 = log_w0 + log_N0;
+                            double log_g1 = log_w1 + log_N1;
+                            
+                            double max_log_g = max(log_g0, log_g1);
+                            double log_total = max_log_g + log(exp(log_g0 - max_log_g) + exp(log_g1 - max_log_g));
+                            
+                            g0[i] = exp(log_g0 - log_total);
+                            g1[i] = exp(log_g1 - log_total);
+
+                            return log_total; 
+                        },
+                        0.0, thrust::plus<double>()
+                    );
+
+                    double sum_g0 = thrust::reduce(d_gamma0.begin(), d_gamma0.end(), 0.0);
+                    double sum_g1 = thrust::reduce(d_gamma1.begin(), d_gamma1.end(), 0.0);
+
+                    w0 = sum_g0 / num_rows;
+                    w1 = sum_g1 / num_rows;
+
+                    double old_mean_0 = mean_0, old_mean_1 = mean_1;
+                    double old_var_0 = var_0, old_var_1 = var_1;
+
+                    mean_0 = thrust::inner_product(d_gamma0.begin(), d_gamma0.end(), d_row_norms.begin(), 0.0) / sum_g0;
+                    mean_1 = thrust::inner_product(d_gamma1.begin(), d_gamma1.end(), d_row_norms.begin(), 0.0) / sum_g1;
+
+                    var_0 = thrust::transform_reduce(thrust::device,
+                        thrust::make_counting_iterator(0),
+                        thrust::make_counting_iterator(num_rows),
+                        [=] __device__ (int i) -> double { return g0[i] * (row_norms[i] - mean_0) * (row_norms[i] - mean_0); },
+                        0.0, thrust::plus<double>()
+                    ) / sum_g0 + var_reg;
+
+                    var_1 = thrust::transform_reduce(thrust::device,
+                        thrust::make_counting_iterator(0),
+                        thrust::make_counting_iterator(num_rows),
+                        [=] __device__ (int i) -> double { return g1[i] * (row_norms[i] - mean_1) * (row_norms[i] - mean_1); },
+                        0.0, thrust::plus<double>()
+                    ) / sum_g1 + var_reg;
+
+                    // Check Convergence
+                    if (abs(mean_0 - old_mean_0) / abs(old_mean_0) < gmm_tol && 
+                        abs(mean_1 - old_mean_1) / abs(old_mean_1) < gmm_tol && 
+                        abs(var_0 - old_var_0) / abs(old_var_0) < gmm_tol && 
+                        abs(var_1 - old_var_1) / abs(old_var_1) < gmm_tol) 
+                    {
+                        break;
+                    }
+                }
+
+                int num_bad_dofs = 0;
+                if (abs(mean_1) / abs(mean_0) > gmm_jump_threshold)
+                {
+                    d_all_bad_dofs.resize(num_rows);
+                    auto end_it = thrust::copy_if(thrust::device,
+                        thrust::make_counting_iterator(0),
+                        thrust::make_counting_iterator(num_rows),
+                        d_all_bad_dofs.begin(),
+                        [=] __device__ (int i) { return g0[i] < g1[i]; }
+                    );
+
+                    num_bad_dofs = thrust::distance(d_all_bad_dofs.begin(), end_it);
+                }
+
+                d_all_bad_dofs.resize(num_bad_dofs);
+
+                std::vector<int> h_bad_dofs(num_bad_dofs);
+                thrust::copy(d_all_bad_dofs.begin(), d_all_bad_dofs.end(), h_bad_dofs.begin());
+
+                h_all_bad_dofs.insert(h_bad_dofs.begin(), h_bad_dofs.end());
                 break;
             }
         }
 
-        int num_bad_dofs = 0;
-        if (abs(mean_1) / abs(mean_0) > gmm_jump_threshold)
+        switch (subdomain_selection_strategy)
         {
-            d_all_bad_dofs.resize(num_rows);
-            auto end_it = thrust::copy_if(thrust::device,
-                thrust::make_counting_iterator(0),
-                thrust::make_counting_iterator(num_rows),
-                d_all_bad_dofs.begin(),
-                [=] __device__ (int i) { return g0[i] < g1[i]; }
-            );
-
-            num_bad_dofs = thrust::distance(d_all_bad_dofs.begin(), end_it);
+            case SubdomainSelectionStrategy::KNEE:
+                SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [strategy=KNEE] [global_mean={}] [global_var={}] [split_idx={}] [max_dist={}] [num_bad_dofs={}]", 
+                    name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, max_dist, h_all_bad_dofs.size());
+                break;
+            case SubdomainSelectionStrategy::FD:
+                SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [strategy=FD] [global_mean={}] [global_var={}] [split_idx={}] [max_jump={}] [num_bad_dofs={}]", 
+                    name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, max_jump, h_all_bad_dofs.size());
+                break;
+            case SubdomainSelectionStrategy::GMM:
+                SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [strategy=GMM] [global_mean={}] [global_var={}] [mean_0={}] [mean_1={}] [var_0={}] [var_1={}] [gmm_iters={}] [num_bad_dofs={}]", 
+                    name(), elapsed_seconds(phase_begin), global_mean, global_var, mean_0, mean_1, var_0, var_1, gmm_iter, h_all_bad_dofs.size());
+                break;
+            case SubdomainSelectionStrategy::COST:
+                SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [strategy=COST] [global_mean={}] [global_var={}] [split_idx={}] [min_cost={}] [num_bad_dofs={}]", 
+                    name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, min_cost, h_all_bad_dofs.size());
+                break;
         }
-
-        d_all_bad_dofs.resize(num_bad_dofs);
-
-        std::vector<int> h_bad_dofs(num_bad_dofs);
-        thrust::copy(d_all_bad_dofs.begin(), d_all_bad_dofs.end(), h_bad_dofs.begin());
-
-        h_all_bad_dofs.clear();
-        h_all_bad_dofs.insert(h_bad_dofs.begin(), h_bad_dofs.end());
-
-        SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [global_mean={}] [global_var={}] [mean_0={}] [mean_1={}] [var_0={}] [var_1={}] [gmm_iters={}] [num_bad_dofs={}]", 
-            name(), elapsed_seconds(phase_begin), global_mean, global_var, mean_0, mean_1, var_0, var_1, gmm_iter, num_bad_dofs);
     }
 
     void GPUHybrid::filter_subdomains(const Eigen::SparseMatrix<double> &sparse_A)

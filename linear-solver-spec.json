@@ -516,7 +516,8 @@
             "expand_subdomains",
             "max_dense_size",
             "use_float_on_subdomains",
-            "additive_mode"
+            "additive_mode",
+            "subdomain_selection_strategy"
         ],
         "doc": "Settings for the GPU Hybrid solver."
     },
@@ -753,6 +754,12 @@
         "default": 10000000,
         "type": "int",
         "doc": "Maximum subdomain size."
+    },
+    {
+        "pointer": "/GPUHybrid/subdomain_selection_strategy",
+        "default": "gmm",
+        "type": "string",
+        "doc": "Strategy for selecting subdomains."
     },
     {
         "pointer": "/GPUHybrid/expand_subdomains",

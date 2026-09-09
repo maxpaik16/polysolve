@@ -68,6 +68,14 @@ namespace polysolve::linear
 
         virtual void set_problematic_dofs(const std::set<int> &bad_dofs) override {h_all_bad_dofs = bad_dofs;}
 
+        enum class SubdomainSelectionStrategy {
+            KNEE,
+            GMM,
+            FD,
+            COST,
+            APOSTERIORI
+        };
+
     protected:
         // AMG settings
         double theta = 0.5;
@@ -84,6 +92,8 @@ namespace polysolve::linear
         int max_dense_size = 0;
         bool use_float_on_subdomains = false;
         bool additive_mode = false;
+
+        SubdomainSelectionStrategy subdomain_selection_strategy = SubdomainSelectionStrategy::GMM;
 
         // General solver settings
         int dimension_ = 1; // 1 = scalar (Laplace), 2 or 3 = vector (Elasticity)

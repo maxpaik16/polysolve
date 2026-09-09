@@ -777,10 +777,10 @@ namespace polysolve::linear
 
             for (int i = 0; i < subdomain.size(); ++i)
             {
-                if (contact_patch_scwharz)
+                if (contact_patch_schwarz)
                 {
                     #pragma omp atomic
-                    vec(2 * problem_size + subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                    vec(2 * problem_size + subdomain[i]) += sub_result(index_mappings[index_counter][subdomain[i]]);
                 }
                 else
                 {
