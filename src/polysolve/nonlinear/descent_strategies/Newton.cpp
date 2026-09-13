@@ -145,7 +145,12 @@ namespace polysolve::nonlinear
         : Superclass(sparse, std::numeric_limits<double>::infinity(), solver_params, linear_solver_params, characteristic_length, logger, norm_type)
     {
         const std::string solver_name = linear_solver_name();
-        if (solver_name != "CPUHybrid" && solver_name != "GPUHybrid")
+        // CPUHybridSolver/GPUHybridSolver report themselves as "CPUAMGF"/"GPUAMGF"
+        // (rather than "CPUHybrid"/"GPUHybrid") when select_bad_dofs_from_l1_norm
+        // is false, i.e. the informed/AMGF-Schwarz subdomain-selection mode --
+        // same underlying class, just a different display name.
+        if (solver_name != "CPUHybrid" && solver_name != "GPUHybrid"
+            && solver_name != "CPUAMGF" && solver_name != "GPUAMGF")
             log_and_throw_error(logger, "NewtonCG requires the linear solver to be CPUHybridSolver or GPUHybridSolver, instead got {}", solver_name);
     }
 
