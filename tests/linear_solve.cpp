@@ -318,14 +318,21 @@ int main(int argc, char *argv[])
     std::optional<Eigen::MatrixXd> dense_A;
     Eigen::VectorXd x;
 
+    // Created once and reused for every iteration (rather than once per
+    // iteration) so that solvers with a process-wide setup/teardown cost --
+    // e.g. CPUHybrid, whose construction/destruction respectively spins up
+    // and fully tears down a multi-thread nanompi rank team -- don't pay
+    // that cost (and, for CPUHybrid, don't race tearing the team down and
+    // immediately rebuilding it) on every -w/-r iteration.
+    auto solver = Solver::create(solver_config, *logger);
+    solver->set_problematic_dofs(problem_specific_bad_dofs);
+
     const int iterations = warmup + repeat;
     for (int iteration = 0; iteration < iterations; ++iteration)
     {
         const std::unique_ptr<ScopedOutputSilencer> silencer =
             iteration < warmup ? std::make_unique<ScopedOutputSilencer>() : nullptr;
 
-        auto solver = Solver::create(solver_config, *logger);
-        solver->set_problematic_dofs(problem_specific_bad_dofs);
         SPDLOG_INFO("[{}] [matrix_info] [size={}] [nnzs={}]", solver->name(), A.rows(), A.nonZeros());
         x.resize(A.cols());
         x.setZero();

@@ -223,7 +223,7 @@ namespace polysolve::linear
     void GPUHybridSolver::factorize(const StiffnessMatrix &Ain)
     {
         check_settings();
-        SPDLOG_TRACE("[{}] [start_solve] [0.000000] [problem_size={}]", name(), Ain.rows());
+        SPDLOG_INFO("[{}] [start_solve] [0.000000] [problem_size={}]", name(), Ain.rows());
 
         {
             auto phase_begin = clock::now();
@@ -236,7 +236,7 @@ namespace polysolve::linear
             thrust::copy(Ain.innerIndexPtr(), Ain.innerIndexPtr() + d_inner_indices.size(), d_inner_indices.begin());
             thrust::copy(Ain.valuePtr(), Ain.valuePtr() + d_values.size(), d_values.begin());
 
-            SPDLOG_TRACE("[{}] [copy_matrix_to_gpu] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+            SPDLOG_INFO("[{}] [copy_matrix_to_gpu] [{:.6f}]", name(), elapsed_seconds(phase_begin));
         }
 
         {
@@ -278,7 +278,7 @@ namespace polysolve::linear
 
             factorize_submatrix();
 
-            SPDLOG_TRACE("[{}] [setup_problematic_dof_precond] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+            SPDLOG_INFO("[{}] [setup_problematic_dof_precond] [{:.6f}]", name(), elapsed_seconds(phase_begin));
         }
 
         if (has_matrix_)
@@ -403,7 +403,7 @@ namespace polysolve::linear
 
             HYPRE_BoomerAMGSetup(precond, parcsr_A, par_b, par_x);
             CHECK_CUDA(cudaDeviceSynchronize());
-            SPDLOG_TRACE("[{}] [amg_setup] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+            SPDLOG_INFO("[{}] [amg_setup] [{:.6f}]", name(), elapsed_seconds(phase_begin));
         }
 
         {
@@ -419,7 +419,7 @@ namespace polysolve::linear
             thrust::copy(d_x.begin(), d_x.end(), x.data());
 
             CHECK_CUDA(cudaDeviceSynchronize());
-            SPDLOG_TRACE("[{}] [pcg_solve] [{:.6f}] [pcg_iters={}] [residual={}]", name(), elapsed_seconds(phase_begin), num_iterations, final_res_norm);
+            SPDLOG_INFO("[{}] [pcg_solve] [{:.6f}] [pcg_iters={}] [residual={}]", name(), elapsed_seconds(phase_begin), num_iterations, final_res_norm);
         }
 
         {
@@ -472,7 +472,7 @@ namespace polysolve::linear
         HYPRE_IJMatrixGetObject(A, &temp_A);
         parcsr_A = static_cast<decltype(parcsr_A)>(temp_A);
 
-        SPDLOG_TRACE("[{}] [copy_matrix_to_hypre] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        SPDLOG_INFO("[{}] [copy_matrix_to_hypre] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     void GPUHybridSolver::init_hypre_vectors(const int size)
@@ -504,7 +504,7 @@ namespace polysolve::linear
 
         HYPRE_ParCSRMatrixMatvec(1.0, parcsr_A, par_x, 0.0, par_result);
         CHECK_CUDA(cudaDeviceSynchronize());
-        SPDLOG_TRACE("[{}] [matmul] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        SPDLOG_INFO("[{}] [matmul] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     double GPUHybridSolver::dot(const thrust::device_vector<double> &a, const thrust::device_vector<double> &b)
@@ -624,7 +624,7 @@ namespace polysolve::linear
         vector_add(1.0, z, next_z);
 
         CHECK_CUDA(cudaDeviceSynchronize());
-        SPDLOG_TRACE("[{}] [subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        SPDLOG_INFO("[{}] [subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     void GPUHybridSolver::amg_precond_iter(const HYPRE_Solver &precond, thrust::device_vector<double> &b, thrust::device_vector<double> &x)
@@ -638,7 +638,7 @@ namespace polysolve::linear
 
         HYPRE_BoomerAMGSolve(precond, parcsr_A, par_b, par_x);
         CHECK_CUDA(cudaDeviceSynchronize());
-        SPDLOG_TRACE("[{}] [amg_v_cycle] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        SPDLOG_INFO("[{}] [amg_v_cycle] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     void GPUHybridSolver::decompose_subdomains_to_disjoint_subsets(const Eigen::SparseMatrix<double> &sparse_A)
@@ -683,7 +683,7 @@ namespace polysolve::linear
             bad_indices_arrays.emplace_back(kv.second.begin(), kv.second.end());
         }
 
-        SPDLOG_TRACE("[{}] [subdomain_decomposition] [{}] [num_subdomains={}] ",
+        SPDLOG_INFO("[{}] [subdomain_decomposition] [{}] [num_subdomains={}] ",
                      name(), elapsed_seconds(phase_begin), bad_indices_arrays.size());
     }
 
@@ -925,19 +925,19 @@ namespace polysolve::linear
         switch (subdomain_selection_strategy)
         {
         case SubdomainSelectionStrategy::KNEE:
-            SPDLOG_TRACE("[{}] [bad_dof_selection] [{:.6f}] [strategy=KNEE] [global_mean={}] [global_var={}] [split_idx={}] [max_dist={}] [num_bad_dofs={}]",
+            SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [strategy=KNEE] [global_mean={}] [global_var={}] [split_idx={}] [max_dist={}] [num_bad_dofs={}]",
                          name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, max_dist, h_all_bad_dofs.size());
             break;
         case SubdomainSelectionStrategy::FD:
-            SPDLOG_TRACE("[{}] [bad_dof_selection] [{:.6f}] [strategy=FD] [global_mean={}] [global_var={}] [split_idx={}] [max_jump={}] [num_bad_dofs={}]",
+            SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [strategy=FD] [global_mean={}] [global_var={}] [split_idx={}] [max_jump={}] [num_bad_dofs={}]",
                          name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, max_jump, h_all_bad_dofs.size());
             break;
         case SubdomainSelectionStrategy::COST:
-            SPDLOG_TRACE("[{}] [bad_dof_selection] [{:.6f}] [strategy=COST] [global_mean={}] [global_var={}] [split_idx={}] [min_cost={}] [num_bad_dofs={}]",
+            SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [strategy=COST] [global_mean={}] [global_var={}] [split_idx={}] [min_cost={}] [num_bad_dofs={}]",
                          name(), elapsed_seconds(phase_begin), global_mean, global_var, split_idx, min_cost, h_all_bad_dofs.size());
             break;
         case SubdomainSelectionStrategy::GMM:
-            SPDLOG_TRACE("[{}] [bad_dof_selection] [{:.6f}] [strategy=GMM] [global_mean={}] [global_var={}] [mean_0={}] [mean_1={}] [var_0={}] [var_1={}] [gmm_iters={}] [num_bad_dofs={}]",
+            SPDLOG_INFO("[{}] [bad_dof_selection] [{:.6f}] [strategy=GMM] [global_mean={}] [global_var={}] [mean_0={}] [mean_1={}] [var_0={}] [var_1={}] [gmm_iters={}] [num_bad_dofs={}]",
                          name(), elapsed_seconds(phase_begin), global_mean, global_var, mean_0, mean_1, var_0, var_1, gmm_iter, h_all_bad_dofs.size());
             break;
         case SubdomainSelectionStrategy::APOSTERIORI:
@@ -1028,7 +1028,7 @@ namespace polysolve::linear
             ++num_not_poorly_conditioned;
         }
 
-        SPDLOG_TRACE("[{}] [subdomain_filtering] [{}] [total_dofs_before={}] [total_dofs_after={}] [num_too_small={}] [num_too_large={}] [num_not_poorly_conditioned={}]",
+        SPDLOG_INFO("[{}] [subdomain_filtering] [{}] [total_dofs_before={}] [total_dofs_after={}] [num_too_small={}] [num_too_large={}] [num_not_poorly_conditioned={}]",
                      name(), elapsed_seconds(phase_begin), original_num_bad_dofs, h_all_bad_dofs.size(), num_too_small, num_too_large, num_not_poorly_conditioned);
     }
 
@@ -1050,7 +1050,7 @@ namespace polysolve::linear
 
         h_all_bad_dofs = std::move(new_bad_dofs);
 
-        SPDLOG_TRACE("[{}] [subdomain_expansion] [{}] [num_dofs_before={}] [num_dofs_after={}]",
+        SPDLOG_INFO("[{}] [subdomain_expansion] [{}] [num_dofs_before={}] [num_dofs_after={}]",
                      name(), elapsed_seconds(phase_begin), num_bad_dofs_before, h_all_bad_dofs.size());
     }
 
@@ -1280,7 +1280,7 @@ namespace polysolve::linear
         }
 
         CHECK_CUDA(cudaDeviceSynchronize());
-        SPDLOG_TRACE("[{}] [factorize_submatrix] [{}] [n_sparse={}] [n_sparse_dofs={}]",
+        SPDLOG_INFO("[{}] [factorize_submatrix] [{}] [n_sparse={}] [n_sparse_dofs={}]",
                      name(), elapsed_seconds(phase_begin), sparse_batch_count, total_sparse_dofs);
     }
 
@@ -1323,7 +1323,7 @@ namespace polysolve::linear
 
             gamma = dot(r, z);
             old_gamma = gamma;
-            SPDLOG_TRACE("[{}] [pre_loop] [{:.6f}] [rhs_norm={}]", name(), elapsed_seconds(phase_begin), sqrt(bi_prod));
+            SPDLOG_INFO("[{}] [pre_loop] [{:.6f}] [rhs_norm={}]", name(), elapsed_seconds(phase_begin), sqrt(bi_prod));
         }
 
         for (int k = 0; k < max_iter_; ++k)
@@ -1336,7 +1336,7 @@ namespace polysolve::linear
 
             if (sdotp == 0.0)
             {
-                SPDLOG_TRACE("[{}] [err_zero_sdotp] [0.000000]", name());
+                SPDLOG_INFO("[{}] [err_zero_sdotp] [0.000000]", name());
                 break;
             }
 
@@ -1344,12 +1344,12 @@ namespace polysolve::linear
 
             if (alpha <= 0.0)
             {
-                SPDLOG_TRACE("[{}] [err_negative_alpha] [0.000000]", name());
+                SPDLOG_INFO("[{}] [err_negative_alpha] [0.000000]", name());
                 break;
             }
             else if (alpha < __DBL_MIN__)
             {
-                SPDLOG_TRACE("[{}] [err_subnormal_alpha] [0.000000]", name());
+                SPDLOG_INFO("[{}] [err_subnormal_alpha] [0.000000]", name());
                 break;
             }
 
@@ -1359,13 +1359,13 @@ namespace polysolve::linear
 
             if (rel_eps > 0 && (i_prod / bi_prod) < rel_eps)
             {
-                SPDLOG_TRACE("[{}] [converged_rel] [0.000000]", name());
+                SPDLOG_INFO("[{}] [converged_rel] [0.000000]", name());
                 break;
             }
 
             if (abs_eps > 0 && i_prod < abs_eps)
             {
-                SPDLOG_TRACE("[{}] [converged_abs] [0.000000]", name());
+                SPDLOG_INFO("[{}] [converged_abs] [0.000000]", name());
                 break;
             }
 
@@ -1381,7 +1381,7 @@ namespace polysolve::linear
             vector_add(1.0, z, p);
 
             CHECK_CUDA(cudaDeviceSynchronize());
-            SPDLOG_TRACE("[{}] [pcg_iter] [{:.6f}] [iter={}] [residual={}]", name(), elapsed_seconds(phase_begin), k, sqrt(i_prod));
+            SPDLOG_INFO("[{}] [pcg_iter] [{:.6f}] [iter={}] [residual={}]", name(), elapsed_seconds(phase_begin), k, sqrt(i_prod));
         }
     }
 
