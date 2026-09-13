@@ -125,11 +125,9 @@ namespace polysolve::nonlinear
          {FiniteDiffStrategy::DIRECTIONAL_DERIVATIVE, "DirectionalDerivative"},
          {FiniteDiffStrategy::FULL_FINITE_DIFF, "FullFiniteDiff"}})
 
-    NLOHMANN_JSON_SERIALIZE_ENUM(
-        NormType,
-        {{NormType::EUCLIDEAN, "Euclidean"},
-         {NormType::L2, "L2"},
-         {NormType::Linf, "Linf"}})
+    // NormType's serializer now lives in Problem.hpp (next to the enum
+    // itself), so it's visible to every translation unit that converts a
+    // JSON "norm_type" field, not just this one.
 
     // Static constructor
     std::unique_ptr<Solver> Solver::create(

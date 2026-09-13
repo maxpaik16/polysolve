@@ -19,6 +19,21 @@ namespace polysolve::nonlinear
         Linf = 2
     };
 
+    // Defined here (rather than in Solver.cpp, where it previously lived) so
+    // that every translation unit that converts a JSON "norm_type" string to
+    // a NormType sees this mapping via ADL. NLOHMANN_JSON_SERIALIZE_ENUM
+    // expands to template<> to_json/from_json overloads, so defining it in a
+    // header is safe (no ODR/duplicate-symbol issues); previously, code
+    // outside Solver.cpp's own translation unit silently fell back to
+    // nlohmann's generic enum-as-integer conversion, which rejects the
+    // string values ("L2", etc.) that json-specs actually declares for this
+    // field.
+    NLOHMANN_JSON_SERIALIZE_ENUM(
+        NormType,
+        {{NormType::EUCLIDEAN, "Euclidean"},
+         {NormType::L2, "L2"},
+         {NormType::Linf, "Linf"}})
+
     /// @brief Class defining optimization problem to be solved. To be defined by user code
     class Problem
     {
