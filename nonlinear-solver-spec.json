@@ -25,6 +25,7 @@
             "StochasticGradientDescent",
             "NonlinearCG",
             "box_constraints",
+            "simple_linear",
             "advanced"
         ],
         "doc": "Settings for nonlinear solver. Interior-loop linear solver settings are defined in the solver/linear section."
@@ -758,6 +759,12 @@
         "type": "float",
         "min_value": 0,
         "doc": "Relative tolerance on E to switch to approximate."
+    },
+    {
+        "pointer": "/simple_linear",
+        "default": "Eigen::SimplicialLDLT",
+        "type": "string",
+        "doc": "Linear solver used internally by callers for small, auxiliary linear systems unrelated to the main Hessian/energy solve (e.g. a constraint-elimination projection), as opposed to the (possibly heavyweight, e.g. Hybrid/AMGF) solver configured in solver/linear for the main solve. Not read by polysolve::nonlinear::Solver itself; exposed here so callers building such auxiliary solves have a single, user-configurable place to look."
     },
     {
         "pointer": "/box_constraints",
