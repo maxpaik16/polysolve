@@ -180,8 +180,8 @@ namespace polysolve::linear
         double conditioning_threshold = 100.0;
 
         // solve information
-        HYPRE_Int num_iterations;
-        HYPRE_Complex final_res_norm;
+        HYPRE_Int num_iterations = 0;
+        HYPRE_Complex final_res_norm = 0;
 
     private:
         bool has_matrix_ = false;

@@ -653,6 +653,8 @@ namespace polysolve::linear
         double pre_loop_time;
         double bi_prod, rel_eps, abs_eps, gamma, old_gamma;
 
+        num_iterations = 0;
+
         r.setZero();
         {
             auto phase_begin = clock::now();
@@ -1436,7 +1438,6 @@ namespace polysolve::linear
         int num_bad_dofs_before = all_bad_dofs.size();
 
         std::set<int> new_bad_dofs;
-        ;
 
         for (int k : all_bad_dofs)
         {
