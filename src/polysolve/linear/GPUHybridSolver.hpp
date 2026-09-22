@@ -117,6 +117,12 @@ namespace polysolve::linear
         double abs_conv_tol_ = 0.0;
         double conditioning_threshold = 100.0;
 
+        // When false, skips the per-PCG-iteration timing logs (matmul,
+        // amg_v_cycle, subdomain_solve, contact_patch_dense_subdomain_solve,
+        // pcg_iter) so a long solve doesn't flood the log; every other log
+        // line is unaffected.
+        bool detailed_log = true;
+
         // solve information
         HYPRE_Int num_iterations;
         HYPRE_Complex final_res_norm;

@@ -512,7 +512,8 @@
             "additive_mode",
             "select_bad_dofs_from_l1_norm",
             "subdomain_selection_strategy",
-            "contact_patch_schwarz"
+            "contact_patch_schwarz",
+            "detailed_log"
         ],
         "doc": "Settings for the CPUHybrid solver."
     },
@@ -620,6 +621,12 @@
         "doc": "Additionally give each contact patch (see Solver::contact_patches) its own overlapping subdomain, combined additively (Schwarz) with the rest of the problematic subspace."
     },
     {
+        "pointer": "/CPUHybrid/detailed_log",
+        "default": true,
+        "type": "bool",
+        "doc": "If false, skip the per-PCG-iteration timing logs (matmul, amg_v_cycle, subdomain_solve, pcg_iter) so a long solve doesn't flood the log; every other log line is unaffected."
+    },
+    {
         "pointer": "/GPUHybrid",
         "default": null,
         "type": "object",
@@ -639,7 +646,8 @@
             "additive_mode",
             "select_bad_dofs_from_l1_norm",
             "subdomain_selection_strategy",
-            "contact_patch_schwarz"
+            "contact_patch_schwarz",
+            "detailed_log"
         ],
         "doc": "Settings for the GPUHybrid solver."
     },
@@ -745,5 +753,11 @@
         "default": false,
         "type": "bool",
         "doc": "Additionally give each contact patch (see Solver::contact_patches) its own overlapping subdomain, combined additively (Schwarz) with the rest of the problematic subspace. Unlike the generic problematic subspace, contact patches are factorized and solved with a fixed-size (64 dof) dense batched GPU solve; a contact patch with more than 64 dofs throws."
+    },
+    {
+        "pointer": "/GPUHybrid/detailed_log",
+        "default": true,
+        "type": "bool",
+        "doc": "If false, skip the per-PCG-iteration timing logs (matmul, amg_v_cycle, subdomain_solve, contact_patch_dense_subdomain_solve, pcg_iter) so a long solve doesn't flood the log; every other log line is unaffected."
     }
 ]

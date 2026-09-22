@@ -81,6 +81,17 @@
         }                                                                 \
     } while (0)
 
+    // Per-PCG-iteration timing logs (matmul, amg_v_cycle, subdomain_solve,
+    // contact_patch_dense_subdomain_solve, pcg_iter) go through this instead
+    // of SPDLOG_INFO directly, so they can be silenced with
+    // detailed_log=false without affecting any other log line.
+#define GPUHYBRID_LOG_ITER(...)     \
+    do                              \
+    {                               \
+        if (detailed_log)           \
+            SPDLOG_INFO(__VA_ARGS__); \
+    } while (0)
+
 namespace polysolve::linear
 {
 
@@ -178,6 +189,10 @@ namespace polysolve::linear
             if (params["GPUHybrid"].contains("contact_patch_schwarz"))
             {
                 contact_patch_schwarz = params["GPUHybrid"]["contact_patch_schwarz"];
+            }
+            if (params["GPUHybrid"].contains("detailed_log"))
+            {
+                detailed_log = params["GPUHybrid"]["detailed_log"];
             }
             if (params["GPUHybrid"].contains("select_bad_dofs_from_l1_norm"))
             {
@@ -537,7 +552,7 @@ namespace polysolve::linear
 
         HYPRE_ParCSRMatrixMatvec(1.0, parcsr_A, par_x, 0.0, par_result);
         CHECK_CUDA(cudaDeviceSynchronize());
-        SPDLOG_INFO("[{}] [matmul] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        GPUHYBRID_LOG_ITER("[{}] [matmul] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     double GPUHybridSolver::dot(const thrust::device_vector<double> &a, const thrust::device_vector<double> &b)
@@ -663,7 +678,7 @@ namespace polysolve::linear
         vector_add(1.0, z, next_z);
 
         CHECK_CUDA(cudaDeviceSynchronize());
-        SPDLOG_INFO("[{}] [subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        GPUHYBRID_LOG_ITER("[{}] [subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     void GPUHybridSolver::dense_contact_patch_precond_iter(thrust::device_vector<double> &z, thrust::device_vector<double> &r, thrust::device_vector<double> &next_z)
@@ -754,7 +769,7 @@ namespace polysolve::linear
         vector_add(1.0, z, next_z);
 
         CHECK_CUDA(cudaDeviceSynchronize());
-        SPDLOG_INFO("[{}] [contact_patch_dense_subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        GPUHYBRID_LOG_ITER("[{}] [contact_patch_dense_subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     void GPUHybridSolver::amg_precond_iter(const HYPRE_Solver &precond, thrust::device_vector<double> &b, thrust::device_vector<double> &x)
@@ -768,7 +783,7 @@ namespace polysolve::linear
 
         HYPRE_BoomerAMGSolve(precond, parcsr_A, par_b, par_x);
         CHECK_CUDA(cudaDeviceSynchronize());
-        SPDLOG_INFO("[{}] [amg_v_cycle] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        GPUHYBRID_LOG_ITER("[{}] [amg_v_cycle] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     void GPUHybridSolver::decompose_subdomains_to_disjoint_subsets(const Eigen::SparseMatrix<double> &sparse_A)
@@ -1690,7 +1705,7 @@ namespace polysolve::linear
             vector_add(1.0, z, p);
 
             CHECK_CUDA(cudaDeviceSynchronize());
-            SPDLOG_INFO("[{}] [pcg_iter] [{:.6f}] [iter={}] [residual={}]", name(), elapsed_seconds(phase_begin), k, sqrt(i_prod));
+            GPUHYBRID_LOG_ITER("[{}] [pcg_iter] [{:.6f}] [iter={}] [residual={}]", name(), elapsed_seconds(phase_begin), k, sqrt(i_prod));
         }
     }
 

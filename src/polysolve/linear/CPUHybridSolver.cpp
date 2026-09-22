@@ -55,6 +55,16 @@ namespace polysolve::linear
             SPDLOG_INFO(__VA_ARGS__); \
     } while (0)
 
+    // Per-PCG-iteration timing logs (matmul, amg_v_cycle, subdomain_solve,
+    // pcg_iter) go through this instead of CPUHYBRID_LOG_INFO, so they can be
+    // silenced with detailed_log=false without affecting any other log line.
+#define CPUHYBRID_LOG_ITER(...)                   \
+    do                                             \
+    {                                              \
+        if (myid == 0 && detailed_log)             \
+            SPDLOG_INFO(__VA_ARGS__);               \
+    } while (0)
+
     CPUHybridSolver::CPUHybridSolver()
     {
         // Ranks are threads of this process. The first solver constructed
@@ -214,6 +224,10 @@ namespace polysolve::linear
             if (shared_params["CPUHybrid"].contains("contact_patch_schwarz"))
             {
                 contact_patch_schwarz = shared_params["CPUHybrid"]["contact_patch_schwarz"];
+            }
+            if (shared_params["CPUHybrid"].contains("detailed_log"))
+            {
+                detailed_log = shared_params["CPUHybrid"]["detailed_log"];
             }
         }
     }
@@ -747,7 +761,7 @@ namespace polysolve::linear
             old_gamma = gamma;
 
             p = z1 + beta * p;
-            CPUHYBRID_LOG_INFO("[{}] [pcg_iter] [{:.6f}] [iter={}] [residual={}]", name(), elapsed_seconds(phase_begin), k, sqrt(i_prod));
+            CPUHYBRID_LOG_ITER("[{}] [pcg_iter] [{:.6f}] [iter={}] [residual={}]", name(), elapsed_seconds(phase_begin), k, sqrt(i_prod));
         }
         MPI_Barrier(MPI_COMM_WORLD);
     }
@@ -877,7 +891,7 @@ namespace polysolve::linear
         }
         MPI_Win_fence(0, vec_win);
 
-        CPUHYBRID_LOG_INFO("[{}] [subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        CPUHYBRID_LOG_ITER("[{}] [subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     void CPUHybridSolver::select_bad_dofs(SharedSparseMatrix &sparse_A)
@@ -1199,7 +1213,7 @@ namespace polysolve::linear
         HYPRE_IJVectorAssemble(ij_b);
         HYPRE_IJVectorGetObject(ij_b, (void **)&par_result);
         HYPRE_ParCSRMatrixMatvec(1.0, parcsr_A, par_x, 0.0, par_result);
-        CPUHYBRID_LOG_INFO("[{}] [matmul] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+        CPUHYBRID_LOG_ITER("[{}] [matmul] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     double CPUHybridSolver::dot(Eigen::VectorXd &a, Eigen::VectorXd &b)
