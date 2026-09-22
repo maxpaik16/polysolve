@@ -304,11 +304,12 @@ if(POLYSOLVE_WITH_CUDA)
   target_link_libraries(polysolve PUBLIC CCCL::CCCL)
 endif()
 
-# Cuda runtime and cuSparse
+# Cuda runtime, cuSparse and cuBLAS (cuBLAS is used by GPUHybridSolver's
+# contact_patch_schwarz dense batched subdomain solve)
 if (POLYSOLVE_WITH_CUDA)
     find_package(CUDAToolkit REQUIRED)
-    target_link_libraries(polysolve PUBLIC CUDA::cudart CUDA::cusparse)
-    target_link_libraries(polysolve_linear PUBLIC CUDA::cudart CUDA::cusparse)
+    target_link_libraries(polysolve PUBLIC CUDA::cudart CUDA::cusparse CUDA::cublas)
+    target_link_libraries(polysolve_linear PUBLIC CUDA::cudart CUDA::cusparse CUDA::cublas)
 endif()
 
 # ------

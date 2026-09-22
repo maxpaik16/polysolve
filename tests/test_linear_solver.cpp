@@ -289,6 +289,90 @@ TEST_CASE("hybrid_convergence", "[.][solver]")
     }
 }
 
+// Contact patches may overlap (e.g. a dof shared by two contact pairs). With
+// contact_patch_schwarz, each patch gets its own subdomain solve and their
+// corrections are summed for shared dofs, damped by the average overlap --
+// see CPUHybridSolver::dss_precond_iter / GPUHybridSolver::dense_contact_patch_precond_iter.
+// This checks that the solve still converges to the right answer with
+// genuinely overlapping patches, and (GPU only) that a patch bigger than the
+// fixed-size dense batched solve is rejected rather than silently corrupting
+// memory.
+TEST_CASE("contact_patch_schwarz", "[.][solver]")
+{
+    const std::string path = POLYFEM_DATA_DIR;
+    Eigen::SparseMatrix<double> A;
+    const bool ok = loadMarket(A, path + "/A_contact.mtx");
+    REQUIRE(ok);
+
+    std::vector<std::set<int>> patches;
+    // Two overlapping patches (dofs 3,4,5 are shared by both).
+    patches.push_back({0, 1, 2, 3, 4, 5});
+    patches.push_back({3, 4, 5, 6, 7, 8});
+    // A third, disjoint patch elsewhere in the system.
+    patches.push_back({30, 31, 32, 33, 34, 35});
+
+    std::vector<std::string> solvers;
+#ifdef POLYSOLVE_WITH_CPU_HYBRID
+    solvers.push_back("CPUHybrid");
+#endif
+#ifdef POLYSOLVE_WITH_GPU_HYBRID
+    solvers.push_back("GPUHybrid");
+#endif
+
+    for (const auto &s : solvers)
+    {
+        auto solver = Solver::create(s, "");
+        json params;
+        params[s]["relative_tolerance"] = 0;
+        params[s]["absolute_tolerance"] = 1e-12;
+        params[s]["select_bad_dofs_from_l1_norm"] = false;
+        params[s]["decompose_subdomains"] = false;
+        params[s]["contact_patch_schwarz"] = true;
+
+        solver->set_block_size(3);
+        solver->set_parameters(params);
+        solver->contact_patches = patches;
+
+        Eigen::VectorXd b(A.rows());
+        b.setRandom();
+        Eigen::VectorXd x(b.size());
+        x.setZero();
+
+        solver->analyze_pattern(A, A.rows());
+        solver->factorize(A);
+        solver->solve(b, x);
+
+        // A_contact.mtx is quite ill-conditioned, and here only a handful of
+        // dofs (the contact patches) get any subspace correction at all
+        // (select_bad_dofs_from_l1_norm is off), so convergence is slow;
+        // loosen the tolerance accordingly relative to the other hybrid tests.
+        const double err = (A * x - b).norm();
+        INFO("solver: " + s);
+        REQUIRE(err < 1e-3);
+    }
+
+#ifdef POLYSOLVE_WITH_GPU_HYBRID
+    {
+        auto solver = Solver::create("GPUHybrid", "");
+        json params;
+        params["GPUHybrid"]["select_bad_dofs_from_l1_norm"] = false;
+        params["GPUHybrid"]["decompose_subdomains"] = false;
+        params["GPUHybrid"]["contact_patch_schwarz"] = true;
+
+        solver->set_block_size(3);
+        solver->set_parameters(params);
+
+        std::set<int> oversized_patch;
+        for (int i = 0; i < 65; ++i)
+            oversized_patch.insert(i);
+        solver->contact_patches = {oversized_patch};
+
+        solver->analyze_pattern(A, A.rows());
+        REQUIRE_THROWS(solver->factorize(A));
+    }
+#endif
+}
+
 // Checks set_block_mapping (HYPRE_BoomerAMGSetDofFunc) for Hypre and the CPU/GPU
 // hybrid solvers: an explicit mapping that reproduces HYPRE's own default
 // interleaved dof_func (row i -> function i % block_size) should converge in the

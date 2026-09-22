@@ -21,6 +21,7 @@
 #include <thrust/inner_product.h>
 #include <thrust/distance.h>
 #include <thrust/binary_search.h>
+#include <thrust/reduce.h>
 
 #include <algorithm>
 #include <cmath>
@@ -68,6 +69,18 @@
         }                                                                 \
     } while (0)
 
+#define CHECK_CUBLAS(call)                                                 \
+    do                                                                     \
+    {                                                                      \
+        cublasStatus_t status = call;                                     \
+        if (status != CUBLAS_STATUS_SUCCESS)                              \
+        {                                                                 \
+            std::cerr << "cuBLAS Error at " << __FILE__ << ":" << __LINE__ \
+                      << " code " << (int)status << std::endl;            \
+            exit(EXIT_FAILURE);                                          \
+        }                                                                 \
+    } while (0)
+
 namespace polysolve::linear
 {
 
@@ -103,6 +116,7 @@ namespace polysolve::linear
         HYPRE_SetUseGpuRand(true);
 
         CHECK_CUDSS(cudssCreate(&cudss_handle));
+        CHECK_CUBLAS(cublasCreate(&cublas_handle));
     }
 
     void GPUHybridSolver::set_parameters(const json &params)
@@ -160,6 +174,10 @@ namespace polysolve::linear
             if (params["GPUHybrid"].contains("additive_mode"))
             {
                 additive_mode = params["GPUHybrid"]["additive_mode"];
+            }
+            if (params["GPUHybrid"].contains("contact_patch_schwarz"))
+            {
+                contact_patch_schwarz = params["GPUHybrid"]["contact_patch_schwarz"];
             }
             if (params["GPUHybrid"].contains("select_bad_dofs_from_l1_norm"))
             {
@@ -245,6 +263,14 @@ namespace polysolve::linear
             bad_indices_arrays.clear();
             select_bad_dofs();
 
+            if (contact_patch_schwarz)
+            {
+                for (const auto &patch : contact_patches)
+                {
+                    bad_indices_arrays.emplace_back(patch.begin(), patch.end());
+                }
+            }
+
             if (decompose_subdomains)
             {
                 filter_subdomains(Ain);
@@ -259,24 +285,31 @@ namespace polysolve::linear
             {
                 decompose_subdomains_to_disjoint_subsets(Ain);
             }
-            else
+            else if (!contact_patch_schwarz)
             {
                 bad_indices_arrays.emplace_back(h_all_bad_dofs.begin(), h_all_bad_dofs.end());
             }
 
-            d_all_bad_dofs.clear();
-            h_subdomain_sizes.clear();
-            d_subdomain_sizes.clear();
-
-            for (int i = 0; i < bad_indices_arrays.size(); ++i)
+            if (contact_patch_schwarz)
             {
-                d_all_bad_dofs.insert(d_all_bad_dofs.end(), bad_indices_arrays[i].begin(), bad_indices_arrays[i].end());
-                h_subdomain_sizes.push_back(bad_indices_arrays[i].size());
+                factorize_contact_patches_dense(Ain);
             }
+            else
+            {
+                d_all_bad_dofs.clear();
+                h_subdomain_sizes.clear();
+                d_subdomain_sizes.clear();
 
-            d_subdomain_sizes.insert(d_subdomain_sizes.end(), h_subdomain_sizes.begin(), h_subdomain_sizes.end());
+                for (int i = 0; i < bad_indices_arrays.size(); ++i)
+                {
+                    d_all_bad_dofs.insert(d_all_bad_dofs.end(), bad_indices_arrays[i].begin(), bad_indices_arrays[i].end());
+                    h_subdomain_sizes.push_back(bad_indices_arrays[i].size());
+                }
 
-            factorize_submatrix();
+                d_subdomain_sizes.insert(d_subdomain_sizes.end(), h_subdomain_sizes.begin(), h_subdomain_sizes.end());
+
+                factorize_submatrix();
+            }
 
             SPDLOG_INFO("[{}] [setup_problematic_dof_precond] [{:.6f}]", name(), elapsed_seconds(phase_begin));
         }
@@ -562,7 +595,7 @@ namespace polysolve::linear
 
     void GPUHybridSolver::custom_mixed_precond_iter(const HYPRE_Solver &precond, thrust::device_vector<double> &r, thrust::device_vector<double> &z, thrust::device_vector<double> &buffer, thrust::device_vector<double> &z2)
     {
-        if (d_all_bad_dofs.size() == 0)
+        if (d_all_bad_dofs.size() == 0 && num_contact_patches_ == 0)
         {
             amg_precond_iter(precond, r, z);
         }
@@ -591,6 +624,12 @@ namespace polysolve::linear
 
     void GPUHybridSolver::dss_precond_iter(thrust::device_vector<double> &z, thrust::device_vector<double> &r, thrust::device_vector<double> &next_z)
     {
+        if (contact_patch_schwarz)
+        {
+            dense_contact_patch_precond_iter(z, r, next_z);
+            return;
+        }
+
         auto phase_begin = clock::now();
 
         matmul(z, next_z);
@@ -625,6 +664,97 @@ namespace polysolve::linear
 
         CHECK_CUDA(cudaDeviceSynchronize());
         SPDLOG_INFO("[{}] [subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
+    }
+
+    void GPUHybridSolver::dense_contact_patch_precond_iter(thrust::device_vector<double> &z, thrust::device_vector<double> &r, thrust::device_vector<double> &next_z)
+    {
+        auto phase_begin = clock::now();
+
+        matmul(z, next_z);
+        vector_scale(-1.0, next_z);
+        vector_add(1.0, r, next_z);
+
+        if (num_contact_patches_ > 0)
+        {
+            thrust::fill(d_dense_b.begin(), d_dense_b.end(), 0.0);
+
+            const double *raw_next_z = thrust::raw_pointer_cast(next_z.data());
+            double *raw_dense_b = thrust::raw_pointer_cast(d_dense_b.data());
+            const int *raw_dof_map = thrust::raw_pointer_cast(d_contact_dof_map.data());
+            const int *raw_slot = thrust::raw_pointer_cast(d_contact_real_to_dense_slot.data());
+
+            // Scatter each real dof's current rhs into its patch's padded
+            // slot; padding slots stay 0 from the fill above, so they solve
+            // to 0 and never affect the real dofs (see factorize_contact_patches_dense).
+            thrust::for_each(thrust::device,
+                             thrust::make_counting_iterator(0),
+                             thrust::make_counting_iterator(total_contact_patch_real_dofs_),
+                             [=] __device__(int i) {
+                                 raw_dense_b[raw_slot[i]] = raw_next_z[raw_dof_map[i]];
+                             });
+
+            // getrsBatched's info is a single HOST scalar (parameter validation
+            // only), unlike getrfBatched's per-matrix DEVICE info array used in
+            // factorize_contact_patches_dense -- these are not interchangeable.
+            int host_info = 0;
+            CHECK_CUBLAS(cublasDgetrsBatched(
+                cublas_handle, CUBLAS_OP_N, kContactPatchDenseSize, 1,
+                thrust::raw_pointer_cast(d_dense_A_ptrs.data()), kContactPatchDenseSize,
+                thrust::raw_pointer_cast(d_dense_pivot.data()),
+                thrust::raw_pointer_cast(d_dense_b_ptrs.data()), kContactPatchDenseSize,
+                &host_info, num_contact_patches_));
+            if (host_info != 0)
+            {
+                throw std::runtime_error("GPUHybridSolver: cublasDgetrsBatched reported an invalid argument (info=" + std::to_string(host_info) + ")");
+            }
+        }
+
+        thrust::fill(next_z.begin(), next_z.end(), 0.0);
+
+        if (num_contact_patches_ > 0)
+        {
+            // Contact patches may overlap, so a dof's solved value can come
+            // from more than one patch. Gather every real entry's solved
+            // value (still in the padded per-patch layout) into the order
+            // sorted by global dof -- precomputed once at factorize time --
+            // then sum each dof's duplicate entries with reduce_by_key
+            // instead of racing to scatter overlapping writes into next_z.
+            const double *raw_dense_b = thrust::raw_pointer_cast(d_dense_b.data());
+            const int *raw_slot = thrust::raw_pointer_cast(d_contact_real_to_dense_slot.data());
+            const int *raw_perm = thrust::raw_pointer_cast(d_reduce_perm.data());
+            double *raw_reduce_values = thrust::raw_pointer_cast(d_reduce_values.data());
+
+            thrust::for_each(thrust::device,
+                             thrust::make_counting_iterator(0),
+                             thrust::make_counting_iterator(total_contact_patch_real_dofs_),
+                             [=] __device__(int k) {
+                                 int i = raw_perm[k];
+                                 raw_reduce_values[k] = raw_dense_b[raw_slot[i]];
+                             });
+
+            thrust::reduce_by_key(
+                thrust::device,
+                d_reduce_keys.begin(), d_reduce_keys.end(),
+                d_reduce_values.begin(),
+                d_reduce_unique_keys.begin(), d_reduce_unique_values.begin());
+
+            const double scale = overlap_scale_;
+            thrust::transform(thrust::device,
+                              d_reduce_unique_values.begin(), d_reduce_unique_values.begin() + num_unique_overlap_dofs_,
+                              d_reduce_unique_values.begin(),
+                              [scale] __device__(double v) { return v * scale; });
+
+            thrust::scatter(
+                thrust::device,
+                d_reduce_unique_values.begin(), d_reduce_unique_values.begin() + num_unique_overlap_dofs_,
+                d_reduce_unique_keys.begin(),
+                next_z.begin());
+        }
+
+        vector_add(1.0, z, next_z);
+
+        CHECK_CUDA(cudaDeviceSynchronize());
+        SPDLOG_INFO("[{}] [contact_patch_dense_subdomain_solve] [{:.6f}]", name(), elapsed_seconds(phase_begin));
     }
 
     void GPUHybridSolver::amg_precond_iter(const HYPRE_Solver &precond, thrust::device_vector<double> &b, thrust::device_vector<double> &x)
@@ -1054,6 +1184,185 @@ namespace polysolve::linear
                      name(), elapsed_seconds(phase_begin), num_bad_dofs_before, h_all_bad_dofs.size());
     }
 
+    // Under contact_patch_schwarz, bad_indices_arrays (the contact patches)
+    // may overlap, so a covered dof can belong to more than one patch.
+    // Compute a single global scale factor -- 1 / (average number of patches
+    // per covered dof) -- used to damp the summed correction in
+    // dense_contact_patch_precond_iter so overlapping patches don't
+    // over-correct on average. Also records the number of distinct covered
+    // dofs, needed to size the reduce_by_key output in that same function.
+    void GPUHybridSolver::compute_overlap_scale()
+    {
+        std::unordered_map<int, int> dof_patch_count;
+        for (const auto &subdomain : bad_indices_arrays)
+        {
+            for (int dof : subdomain)
+            {
+                ++dof_patch_count[dof];
+            }
+        }
+
+        num_unique_overlap_dofs_ = static_cast<int>(dof_patch_count.size());
+
+        if (dof_patch_count.empty())
+        {
+            overlap_scale_ = 1.0;
+            return;
+        }
+
+        long long total_incidences = 0;
+        for (const auto &kv : dof_patch_count)
+        {
+            total_incidences += kv.second;
+        }
+
+        const double avg_overlap = static_cast<double>(total_incidences) / static_cast<double>(dof_patch_count.size());
+        overlap_scale_ = 1.0 / avg_overlap;
+
+        SPDLOG_INFO("[{}] [contact_patch_overlap] [avg_overlap={}] [overlap_scale={}] [num_unique_dofs={}]",
+                     name(), avg_overlap, overlap_scale_, num_unique_overlap_dofs_);
+    }
+
+    void GPUHybridSolver::factorize_contact_patches_dense(const Eigen::SparseMatrix<double> &sparse_A)
+    {
+        auto phase_begin = clock::now();
+
+        free_contact_patch_dense_memory();
+
+        constexpr int N = kContactPatchDenseSize;
+
+        num_contact_patches_ = bad_indices_arrays.size();
+
+        for (const auto &patch : bad_indices_arrays)
+        {
+            if ((int)patch.size() > N)
+            {
+                throw std::runtime_error(
+                    "GPUHybridSolver: contact patch has " + std::to_string(patch.size()) +
+                    " dofs, which exceeds the fixed dense batched solve size of " + std::to_string(N));
+            }
+            total_contact_patch_real_dofs_ += patch.size();
+        }
+
+        if (num_contact_patches_ == 0)
+        {
+            SPDLOG_INFO("[{}] [factorize_contact_patches_dense] [{:.6f}] [n_patches=0]", name(), elapsed_seconds(phase_begin));
+            return;
+        }
+
+        // Assemble each patch's dense (padded) block on the host from the
+        // sparse system matrix, the same way the CPU hybrid solver's
+        // assemble_D does. This runs once per factorize() call, not on the
+        // per-iteration hot path, so host-side assembly is fine here even
+        // though the factorization and every solve happen on the GPU.
+        std::vector<double> h_dense_A(static_cast<size_t>(num_contact_patches_) * N * N, 0.0);
+        std::vector<int> h_dof_map;
+        std::vector<int> h_real_to_dense_slot;
+        h_dof_map.reserve(total_contact_patch_real_dofs_);
+        h_real_to_dense_slot.reserve(total_contact_patch_real_dofs_);
+
+        for (int p = 0; p < num_contact_patches_; ++p)
+        {
+            const auto &patch = bad_indices_arrays[p];
+            std::unordered_map<int, int> local_index;
+            local_index.reserve(patch.size());
+            for (int i = 0; i < (int)patch.size(); ++i)
+            {
+                local_index[patch[i]] = i;
+            }
+
+            double *block = h_dense_A.data() + (size_t)p * N * N;
+
+            for (int local_col = 0; local_col < (int)patch.size(); ++local_col)
+            {
+                int global_col = patch[local_col];
+                for (Eigen::SparseMatrix<double>::InnerIterator it(sparse_A, global_col); it; ++it)
+                {
+                    auto found = local_index.find(it.row());
+                    if (found != local_index.end())
+                    {
+                        // Column-major (lda = N), to match cublas<t>getrfBatched/getrsBatched.
+                        block[found->second + local_col * N] = it.value();
+                    }
+                }
+
+                h_dof_map.push_back(global_col);
+                h_real_to_dense_slot.push_back(p * N + local_col);
+            }
+
+            // Pad the unused rows/cols with an identity block, so the padded
+            // system stays nonsingular and decouples from the real dofs --
+            // the padded slots always solve to 0, leaving the real dofs'
+            // solve exactly as if the patch had been solved unpadded.
+            for (int i = (int)patch.size(); i < N; ++i)
+            {
+                block[i + i * N] = 1.0;
+            }
+        }
+
+        d_dense_A = h_dense_A;
+        d_dense_pivot.resize((size_t)num_contact_patches_ * N);
+        d_dense_info.resize(num_contact_patches_);
+        d_dense_b.resize((size_t)num_contact_patches_ * N);
+        d_contact_dof_map = h_dof_map;
+        d_contact_real_to_dense_slot = h_real_to_dense_slot;
+
+        std::vector<double *> h_dense_A_ptrs(num_contact_patches_);
+        std::vector<double *> h_dense_b_ptrs(num_contact_patches_);
+        double *raw_dense_A = thrust::raw_pointer_cast(d_dense_A.data());
+        double *raw_dense_b = thrust::raw_pointer_cast(d_dense_b.data());
+        for (int p = 0; p < num_contact_patches_; ++p)
+        {
+            h_dense_A_ptrs[p] = raw_dense_A + (size_t)p * N * N;
+            h_dense_b_ptrs[p] = raw_dense_b + (size_t)p * N;
+        }
+        d_dense_A_ptrs = h_dense_A_ptrs;
+        d_dense_b_ptrs = h_dense_b_ptrs;
+
+        // Factorize every patch's padded block in one batched call. d_dense_info
+        // is a device array (one entry per patch), per cublasDgetrfBatched's
+        // documented convention -- unlike getrsBatched's info below, which is
+        // a single host scalar.
+        CHECK_CUBLAS(cublasDgetrfBatched(
+            cublas_handle, N,
+            thrust::raw_pointer_cast(d_dense_A_ptrs.data()), N,
+            thrust::raw_pointer_cast(d_dense_pivot.data()),
+            thrust::raw_pointer_cast(d_dense_info.data()),
+            num_contact_patches_));
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        std::vector<int> h_info(num_contact_patches_);
+        thrust::copy(d_dense_info.begin(), d_dense_info.end(), h_info.begin());
+        for (int p = 0; p < num_contact_patches_; ++p)
+        {
+            if (h_info[p] != 0)
+            {
+                SPDLOG_WARN("[{}] [contact_patch_singular] [patch={}] [info={}]", name(), p, h_info[p]);
+            }
+        }
+
+        compute_overlap_scale();
+
+        // Precompute the sort-by-global-dof plan used every iteration to sum
+        // overlapping patches' contributions to a shared dof with
+        // thrust::reduce_by_key, instead of racing to scatter into it. Since
+        // bad_indices_arrays (and so d_contact_dof_map) is fixed for the life
+        // of this factorization, both the permutation and the sorted keys
+        // only need to be computed once, here.
+        d_reduce_perm.resize(total_contact_patch_real_dofs_);
+        thrust::sequence(d_reduce_perm.begin(), d_reduce_perm.end());
+
+        d_reduce_keys = d_contact_dof_map;
+        thrust::sort_by_key(d_reduce_keys.begin(), d_reduce_keys.end(), d_reduce_perm.begin());
+
+        d_reduce_values.resize(total_contact_patch_real_dofs_);
+        d_reduce_unique_keys.resize(total_contact_patch_real_dofs_);
+        d_reduce_unique_values.resize(total_contact_patch_real_dofs_);
+
+        SPDLOG_INFO("[{}] [factorize_contact_patches_dense] [{:.6f}] [n_patches={}] [n_real_dofs={}] [n_unique_dofs={}]",
+                     name(), elapsed_seconds(phase_begin), num_contact_patches_, total_contact_patch_real_dofs_, num_unique_overlap_dofs_);
+    }
+
     void GPUHybridSolver::factorize_submatrix()
     {
         auto phase_begin = clock::now();
@@ -1395,12 +1704,39 @@ namespace polysolve::linear
         }
 
         free_device_memory();
+        free_contact_patch_dense_memory();
 
         if (cudss_handle)
         {
             cudssDestroy(cudss_handle);
             cudss_handle = nullptr;
         }
+        if (cublas_handle)
+        {
+            cublasDestroy(cublas_handle);
+            cublas_handle = nullptr;
+        }
+    }
+
+    void GPUHybridSolver::free_contact_patch_dense_memory()
+    {
+        num_contact_patches_ = 0;
+        total_contact_patch_real_dofs_ = 0;
+        num_unique_overlap_dofs_ = 0;
+
+        d_dense_A.clear();
+        d_dense_A_ptrs.clear();
+        d_dense_pivot.clear();
+        d_dense_info.clear();
+        d_dense_b.clear();
+        d_dense_b_ptrs.clear();
+        d_contact_dof_map.clear();
+        d_contact_real_to_dense_slot.clear();
+        d_reduce_perm.clear();
+        d_reduce_keys.clear();
+        d_reduce_values.clear();
+        d_reduce_unique_keys.clear();
+        d_reduce_unique_values.clear();
     }
 
     void GPUHybridSolver::free_device_memory()
