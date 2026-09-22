@@ -171,6 +171,18 @@ namespace polysolve::nonlinear
         std::string name() const override { return internal_name() + "NewtonCG"; }
 
         bool compute_update_direction(Problem &objFunc, const TVector &x, const TVector &grad, TVector &direction) override;
+
+    private:
+        const bool force_psd_projection;
+
+    protected:
+        void compute_hessian(Problem &objFunc,
+                             const TVector &x,
+                             polysolve::StiffnessMatrix &hessian) override;
+
+        void compute_hessian(Problem &objFunc,
+                             const TVector &x,
+                             Eigen::MatrixXd &hessian) override;
     };
 
 } // namespace polysolve::nonlinear

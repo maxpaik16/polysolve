@@ -142,7 +142,10 @@ namespace polysolve::nonlinear
         const double characteristic_length,
         spdlog::logger &logger,
         const NormType norm_type)
-        : Superclass(sparse, std::numeric_limits<double>::infinity(), solver_params, linear_solver_params, characteristic_length, logger, norm_type)
+        : Superclass(sparse, std::numeric_limits<double>::infinity(), solver_params, linear_solver_params, characteristic_length, logger, norm_type),
+          force_psd_projection(solver_params.contains("NewtonCG")
+                                    ? solver_params["NewtonCG"].value("force_psd_projection", false)
+                                    : solver_params.value("force_psd_projection", false))
     {
         const std::string solver_name = linear_solver_name();
         // CPUHybridSolver/GPUHybridSolver report themselves as "CPUAMGF"/"GPUAMGF"
@@ -216,6 +219,24 @@ namespace polysolve::nonlinear
         set_linear_solver_relative_tolerance(std::min(0.5, std::sqrt(grad_norm)));
 
         return Superclass::compute_update_direction(objFunc, x, grad, direction);
+    }
+
+    void NewtonCG::compute_hessian(Problem &objFunc,
+                                   const TVector &x,
+                                   polysolve::StiffnessMatrix &hessian)
+
+    {
+        objFunc.set_project_to_psd(force_psd_projection);
+        objFunc.hessian(x, hessian);
+    }
+
+    void NewtonCG::compute_hessian(Problem &objFunc,
+                                   const TVector &x,
+                                   Eigen::MatrixXd &hessian)
+
+    {
+        objFunc.set_project_to_psd(force_psd_projection);
+        objFunc.hessian(x, hessian);
     }
 
     // =======================================================================

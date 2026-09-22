@@ -412,6 +412,9 @@
         "required": [
             "type"
         ],
+        "optional": [
+            "force_psd_projection"
+        ],
         "doc": "Inexact Newton's method that requires the linear solver to be CPUHybrid or GPUHybrid. The linear solver's relative tolerance is set to min(0.5, sqrt(||grad||)) at each iteration and its residual tolerance is treated as infinite, so the (possibly inexact) CG direction is always accepted."
     },
     {
@@ -600,6 +603,12 @@
         "default": 10,
         "type": "float",
         "doc": "Regulariztion weight increment."
+    },
+    {
+        "pointer": "/solver/*/force_psd_projection",
+        "default": false,
+        "type": "bool",
+        "doc": "NewtonCG only: force the Hessian to be projected to PSD before each (inexact, CG-based) linear solve."
     },
     {
         "pointer": "/solver/*/erase_component_probability",
