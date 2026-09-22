@@ -209,6 +209,14 @@ namespace polysolve::linear
         std::vector<std::vector<int>> bad_subdomain_assignments;
         std::vector<std::unordered_map<int, int>> index_mappings;
 
+        // Under contact_patch_schwarz, contact patches (bad_indices_sets) may
+        // overlap, so a dof's additive-Schwarz correction is the sum of every
+        // patch that covers it. That sum is damped by this single global
+        // factor -- 1 / (average number of patches covering a covered dof) --
+        // rather than dividing each dof by its own multiplicity, so overlap
+        // is corrected for on average without per-dof bookkeeping.
+        double overlap_scale_ = 1.0;
+
         Eigen::VectorXd shared_rhs, shared_result;
         Eigen::VectorXd z1, z2, z3;
         Eigen::VectorXd r, p, buffer;
@@ -231,6 +239,7 @@ namespace polysolve::linear
         void load_balance_subdomains();
         void select_bad_dofs(SharedSparseMatrix &sparse_A);
         void factorize_submatrix(SharedSparseMatrix &sparse_A);
+        void compute_overlap_scale();
 
         // matrix multiplication
         void matmul(Eigen::VectorXd &x, Eigen::VectorXd &result);

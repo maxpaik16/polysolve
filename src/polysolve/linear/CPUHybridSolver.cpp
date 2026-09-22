@@ -389,6 +389,12 @@ namespace polysolve::linear
         }
 
         share_bad_subdomains();
+
+        if (contact_patch_schwarz)
+        {
+            compute_overlap_scale();
+        }
+
         factorize_submatrix(shared_A);
 
         CPUHYBRID_LOG_INFO("[{}] [setup_problematic_dof_precond] [{:.6f}]", name(), elapsed_seconds(phase_begin));
@@ -810,6 +816,18 @@ namespace polysolve::linear
         }
         MPI_Win_fence(0, vec_win);
 
+        // Contact patches may overlap, including patches assigned to
+        // different ranks. Rather than have every rank atomically update a
+        // shared correction vector, each rank accumulates the subdomains it
+        // owns into a private buffer (plain += is safe -- nothing else
+        // touches it) and the per-dof sums are then combined once, across
+        // all ranks, with a single sum reduction.
+        Eigen::VectorXd local_correction;
+        if (contact_patch_schwarz)
+        {
+            local_correction = Eigen::VectorXd::Zero(problem_size);
+        }
+
         int index_counter = 0;
         for (int index : bad_subdomain_assignments[myid])
         {
@@ -830,10 +848,7 @@ namespace polysolve::linear
             {
                 if (contact_patch_schwarz)
                 {
-                    // Contact patches may overlap, so accumulate rather than
-                    // overwrite (additive Schwarz).
-                    #pragma omp atomic
-                    vec(2 * problem_size + subdomain[i]) += sub_result(index_mappings[index_counter][subdomain[i]]);
+                    local_correction(subdomain[i]) += sub_result(index_mappings[index_counter][subdomain[i]]);
                 }
                 else
                 {
@@ -842,12 +857,23 @@ namespace polysolve::linear
             }
             ++index_counter;
         }
+
+        if (contact_patch_schwarz)
+        {
+            // Sum each rank's private contribution into the true overall
+            // correction, then damp it by the (global, not per-dof) average
+            // amount of patch overlap so overlapping patches don't
+            // over-correct on average.
+            MPI_Allreduce(MPI_IN_PLACE, local_correction.data(), problem_size, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            local_correction *= overlap_scale_;
+        }
+
         MPI_Barrier(MPI_COMM_WORLD);
 
         MPI_Win_fence(0, vec_win);
         for (int i = 0; i < my_size(); ++i)
         {
-            next_z(i) = vec(starts[myid] + i) + vec(2 * problem_size + starts[myid] + i);
+            next_z(i) = vec(starts[myid] + i) + (contact_patch_schwarz ? local_correction(starts[myid] + i) : vec(2 * problem_size + starts[myid] + i));
         }
         MPI_Win_fence(0, vec_win);
 
@@ -1566,6 +1592,42 @@ namespace polysolve::linear
         }
         CPUHYBRID_LOG_INFO("[{}] [share_bad_subdomains] [{}] ",
                      name(), elapsed_seconds(phase_begin));
+    }
+
+    // Under contact_patch_schwarz, bad_indices_sets (the contact patches) may
+    // overlap, so a covered dof can belong to more than one patch. Compute a
+    // single global scale factor -- 1 / (average number of patches per
+    // covered dof) -- used to damp the summed correction in dss_precond_iter
+    // so overlapping patches don't over-correct on average. bad_indices_sets
+    // is identical on every rank by this point (share_bad_subdomains already
+    // broadcast it), so no communication is needed here.
+    void CPUHybridSolver::compute_overlap_scale()
+    {
+        std::unordered_map<int, int> dof_patch_count;
+        for (const auto &subdomain : bad_indices_sets)
+        {
+            for (int dof : subdomain)
+            {
+                ++dof_patch_count[dof];
+            }
+        }
+
+        if (dof_patch_count.empty())
+        {
+            overlap_scale_ = 1.0;
+            return;
+        }
+
+        long long total_incidences = 0;
+        for (const auto &kv : dof_patch_count)
+        {
+            total_incidences += kv.second;
+        }
+
+        const double avg_overlap = static_cast<double>(total_incidences) / static_cast<double>(dof_patch_count.size());
+        overlap_scale_ = 1.0 / avg_overlap;
+
+        CPUHYBRID_LOG_INFO("[{}] [contact_patch_overlap] [avg_overlap={}] [overlap_scale={}]", name(), avg_overlap, overlap_scale_);
     }
 
     void CPUHybridSolver::load_balance_subdomains()
