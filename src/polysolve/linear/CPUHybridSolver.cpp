@@ -9,6 +9,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <numeric>
 
 #include <HYPRE_utilities.h>
 #include <Eigen/SparseCholesky>
@@ -225,6 +226,14 @@ namespace polysolve::linear
             {
                 contact_patch_schwarz = shared_params["CPUHybrid"]["contact_patch_schwarz"];
             }
+            if (shared_params["CPUHybrid"].contains("contact_patch_remove_covered"))
+            {
+                contact_patch_remove_covered = shared_params["CPUHybrid"]["contact_patch_remove_covered"];
+            }
+            if (shared_params["CPUHybrid"].contains("ras_correction"))
+            {
+                ras_correction = shared_params["CPUHybrid"]["ras_correction"];
+            }
             if (shared_params["CPUHybrid"].contains("detailed_log"))
             {
                 detailed_log = shared_params["CPUHybrid"]["detailed_log"];
@@ -283,6 +292,11 @@ namespace polysolve::linear
         if (subdomain_selection_strategy == SubdomainSelectionStrategy::APOSTERIORI)
         {
             throw std::runtime_error("A Posteriori subdomain selection strategy is not yet implemented!");
+        }
+
+        if (contact_patch_schwarz && ras_correction)
+        {
+            throw std::runtime_error("contact_patch_schwarz and ras_correction cannot both be enabled!");
         }
     }
 
@@ -367,6 +381,7 @@ namespace polysolve::linear
 
         bad_indices_sets.clear();
         bad_indices_arrays.clear();
+        ras_target_dofs.clear();
         select_bad_dofs(shared_A);
 
         if (myid == 0 && contact_patch_schwarz)
@@ -376,25 +391,39 @@ namespace polysolve::linear
                 bad_indices_sets.emplace_back(patch.begin(), patch.end());
                 bad_indices_arrays.emplace_back(patch.begin(), patch.end());
             }
+
+            if (contact_patch_remove_covered)
+            {
+                remove_covered_contact_patches();
+            }
+        }
+
+        if (myid == 0 && ras_correction)
+        {
+            // Snapshot all_bad_dofs into per-dof RAS subdomains now, before
+            // the filter/expand/decompose block below can mutate or replace
+            // all_bad_dofs -- the same reason contact_patch_schwarz builds
+            // its subdomains up front instead of going through that block.
+            build_ras_subdomains(shared_A);
         }
 
         if (myid == 0)
         {
-            if (decompose_subdomains)
+            if (decompose_subdomains && !ras_correction)
             {
                 filter_subdomains(shared_A);
             }
 
-            if (expand_subdomains)
+            if (expand_subdomains && !ras_correction)
             {
                 expand_subdomains_to_strongly_connected(shared_A);
             }
 
-            if (decompose_subdomains)
+            if (decompose_subdomains && !ras_correction)
             {
                 decompose_subdomains_to_disjoint_subsets(shared_A);
             }
-            else if (!contact_patch_schwarz)
+            else if (!contact_patch_schwarz && !ras_correction)
             {
                 bad_indices_sets.emplace_back(all_bad_dofs.begin(), all_bad_dofs.end());
             }
@@ -858,15 +887,27 @@ namespace polysolve::linear
                 sub_result = D_solvers[index_counter]->solve(sub_rhs);
             }
 
-            for (int i = 0; i < subdomain.size(); ++i)
+            if (ras_correction)
             {
-                if (contact_patch_schwarz)
+                // Restricted Additive Schwarz: this subdomain exists only to
+                // correct the one dof it was built around, even though the
+                // solve above covered its whole row neighborhood -- so
+                // overlapping subdomains never double-correct a shared dof.
+                const int target = ras_target_dofs[index];
+                vec(2 * problem_size + target) = sub_result(index_mappings[index_counter][target]);
+            }
+            else
+            {
+                for (int i = 0; i < subdomain.size(); ++i)
                 {
-                    local_correction(subdomain[i]) += sub_result(index_mappings[index_counter][subdomain[i]]);
-                }
-                else
-                {
-                    vec(2 * problem_size + subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                    if (contact_patch_schwarz)
+                    {
+                        local_correction(subdomain[i]) += sub_result(index_mappings[index_counter][subdomain[i]]);
+                    }
+                    else
+                    {
+                        vec(2 * problem_size + subdomain[i]) = sub_result(index_mappings[index_counter][subdomain[i]]);
+                    }
                 }
             }
             ++index_counter;
@@ -1492,6 +1533,105 @@ namespace polysolve::linear
                      name(), elapsed_seconds(phase_begin), num_bad_dofs_before, all_bad_dofs.size());
     }
 
+    // A patch fully contained in another contributes nothing that the larger
+    // patch doesn't already correct, so it is dropped rather than solved and
+    // added redundantly into the overlap sum in dss_precond_iter. Patches are
+    // processed smallest-first so each is only ever tested against patches
+    // that could actually contain it; ties (identical patches) keep exactly
+    // one copy rather than deleting each other.
+    void CPUHybridSolver::remove_covered_contact_patches()
+    {
+        auto phase_begin = clock::now();
+        const int num_before = static_cast<int>(bad_indices_sets.size());
+
+        std::vector<int> order(bad_indices_sets.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            if (bad_indices_sets[a].size() != bad_indices_sets[b].size())
+                return bad_indices_sets[a].size() < bad_indices_sets[b].size();
+            return a < b;
+        });
+
+        std::vector<bool> covered(bad_indices_sets.size(), false);
+        for (size_t oi = 0; oi < order.size(); ++oi)
+        {
+            const int i = order[oi];
+            if (covered[i])
+                continue;
+
+            for (size_t oj = oi + 1; oj < order.size(); ++oj)
+            {
+                const int j = order[oj];
+                if (covered[j] || bad_indices_sets[i].size() > bad_indices_sets[j].size())
+                    continue;
+
+                if (std::includes(bad_indices_sets[j].begin(), bad_indices_sets[j].end(),
+                                   bad_indices_sets[i].begin(), bad_indices_sets[i].end()))
+                {
+                    if (bad_indices_sets[i].size() == bad_indices_sets[j].size())
+                    {
+                        // Identical patches: keep i (processed first), drop j.
+                        covered[j] = true;
+                    }
+                    else
+                    {
+                        covered[i] = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        std::vector<std::set<int>> kept_sets;
+        std::vector<std::vector<int>> kept_arrays;
+        kept_sets.reserve(bad_indices_sets.size());
+        kept_arrays.reserve(bad_indices_arrays.size());
+        for (int i = 0; i < static_cast<int>(bad_indices_sets.size()); ++i)
+        {
+            if (!covered[i])
+            {
+                kept_sets.push_back(std::move(bad_indices_sets[i]));
+                kept_arrays.push_back(std::move(bad_indices_arrays[i]));
+            }
+        }
+        bad_indices_sets = std::move(kept_sets);
+        bad_indices_arrays = std::move(kept_arrays);
+
+        CPUHYBRID_LOG_INFO("[{}] [remove_covered_contact_patches] [{:.6f}] [num_patches_before={}] [num_patches_after={}] [num_removed={}]",
+                     name(), elapsed_seconds(phase_begin), num_before, bad_indices_sets.size(), num_before - static_cast<int>(bad_indices_sets.size()));
+    }
+
+    // RAS: one subdomain per bad dof, made of every dof with a nonzero entry
+    // in that dof's row. sparse_A is column-major, so column k is used as a
+    // stand-in for row k -- the same structural-symmetry assumption already
+    // relied on elsewhere in this file (e.g. assemble_D's global_to_row).
+    // Unlike the other subdomain-construction paths, the subdomain a dof
+    // lands in here is never merged, filtered, or expanded: it is exactly the
+    // dof's own sparsity neighborhood, and dss_precond_iter restricts its
+    // correction to that one owning dof (ras_target_dofs), so overlapping
+    // subdomains never double-correct a dof the way additive Schwarz would.
+    void CPUHybridSolver::build_ras_subdomains(SharedSparseMatrix &sparse_A)
+    {
+        auto phase_begin = clock::now();
+
+        for (int d : all_bad_dofs)
+        {
+            std::set<int> subdomain;
+            for (SharedSparseMatrix::InnerIterator it(sparse_A, d); it; ++it)
+            {
+                subdomain.insert(it.row());
+            }
+            subdomain.insert(d);
+
+            bad_indices_sets.push_back(subdomain);
+            bad_indices_arrays.emplace_back(subdomain.begin(), subdomain.end());
+            ras_target_dofs.push_back(d);
+        }
+
+        CPUHYBRID_LOG_INFO("[{}] [build_ras_subdomains] [{:.6f}] [num_bad_dofs={}] [num_subdomains={}]",
+                     name(), elapsed_seconds(phase_begin), all_bad_dofs.size(), bad_indices_sets.size());
+    }
+
     void CPUHybridSolver::decompose_subdomains_to_disjoint_subsets(SharedSparseMatrix &sparse_A)
     {
         auto phase_begin = clock::now();
@@ -1591,6 +1731,20 @@ namespace polysolve::linear
                 MPI_Bcast(&local_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
                 bad_subdomain_assignments[i].resize(local_size);
                 MPI_Bcast(bad_subdomain_assignments[i].data(), local_size, MPI_INT, 0, MPI_COMM_WORLD);
+            }
+        }
+
+        if (ras_correction)
+        {
+            int ras_size = (myid == 0) ? static_cast<int>(ras_target_dofs.size()) : 0;
+            MPI_Bcast(&ras_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (myid != 0)
+            {
+                ras_target_dofs.resize(ras_size);
+            }
+            if (ras_size > 0)
+            {
+                MPI_Bcast(ras_target_dofs.data(), ras_size, MPI_INT, 0, MPI_COMM_WORLD);
             }
         }
 

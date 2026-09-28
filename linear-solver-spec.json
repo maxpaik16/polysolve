@@ -513,6 +513,8 @@
             "select_bad_dofs_from_l1_norm",
             "subdomain_selection_strategy",
             "contact_patch_schwarz",
+            "contact_patch_remove_covered",
+            "ras_correction",
             "detailed_log"
         ],
         "doc": "Settings for the CPUHybrid solver."
@@ -619,6 +621,18 @@
         "default": false,
         "type": "bool",
         "doc": "Additionally give each contact patch (see Solver::contact_patches) its own overlapping subdomain, combined additively (Schwarz) with the rest of the problematic subspace."
+    },
+    {
+        "pointer": "/CPUHybrid/contact_patch_remove_covered",
+        "default": false,
+        "type": "bool",
+        "doc": "Only used when contact_patch_schwarz is enabled. Before factorizing, drop any contact patch that is fully contained in another patch, since it would only ever add redundant correction; logs the number of patches before and after."
+    },
+    {
+        "pointer": "/CPUHybrid/ras_correction",
+        "default": false,
+        "type": "bool",
+        "doc": "Restricted Additive Schwarz correction: use the same problematic dof set as AMGF/select_bad_dofs, but build one subdomain per dof (every dof with a nonzero entry in that dof's row) and let each subdomain correct only the single dof it was built around, instead of merging dofs into shared clusters. Mutually exclusive with contact_patch_schwarz."
     },
     {
         "pointer": "/CPUHybrid/detailed_log",

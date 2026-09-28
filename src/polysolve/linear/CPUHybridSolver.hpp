@@ -163,6 +163,18 @@ namespace polysolve::linear
         // Give each contact patch its own (possibly overlapping) subdomain,
         // solved additively -- an additive Schwarz treatment of contact DOFs.
         bool contact_patch_schwarz = false;
+        // Under contact_patch_schwarz, drop any patch that is fully contained
+        // in another patch before factorizing -- it would only ever be
+        // redundant additive correction, since the larger patch already
+        // covers every one of its dofs.
+        bool contact_patch_remove_covered = false;
+        // Restricted Additive Schwarz: build one subdomain per bad dof (every
+        // dof with a nonzero entry in that dof's row/column, since the matrix
+        // is assumed structurally symmetric -- see assemble_D), but only let
+        // that subdomain correct the single dof it was built around. Uses the
+        // same bad-dof set as AMGF/select_bad_dofs. Mutually exclusive with
+        // contact_patch_schwarz.
+        bool ras_correction = false;
 
         // General solver settings
         int dimension_ = 1; // 1 = scalar (Laplace), 2 or 3 = vector (Elasticity)
@@ -214,6 +226,13 @@ namespace polysolve::linear
         std::vector<std::vector<int>> bad_subdomain_assignments;
         std::vector<std::unordered_map<int, int>> index_mappings;
 
+        // Under ras_correction, bad_indices_sets/bad_indices_arrays[i] holds
+        // the RAS subdomain built around a single dof; ras_target_dofs[i] is
+        // that dof -- the only one whose correction the subdomain is allowed
+        // to write back. Shared to every rank in share_bad_subdomains, same
+        // as bad_indices_sets.
+        std::vector<int> ras_target_dofs;
+
         // Under contact_patch_schwarz, contact patches (bad_indices_sets) may
         // overlap, so a dof's additive-Schwarz correction is the sum of every
         // patch that covers it. That sum is damped by this single global
@@ -240,6 +259,8 @@ namespace polysolve::linear
         void decompose_subdomains_to_disjoint_subsets(SharedSparseMatrix &sparse_A);
         void filter_subdomains(SharedSparseMatrix &sparse_A);
         void expand_subdomains_to_strongly_connected(SharedSparseMatrix &sparse_A);
+        void remove_covered_contact_patches();
+        void build_ras_subdomains(SharedSparseMatrix &sparse_A);
         void share_bad_subdomains();
         void load_balance_subdomains();
         void select_bad_dofs(SharedSparseMatrix &sparse_A);
