@@ -14,6 +14,7 @@
 #include <iostream>
 #include <unsupported/Eigen/SparseExtra>
 #include <fstream>
+#include <algorithm>
 #include <vector>
 #include <ctime>
 #include <chrono>
@@ -134,7 +135,7 @@ TEST_CASE("all", "[solver]")
             params[s]["use_preconditioned_residual_norm"] = false;
             solver->set_parameters(params);
         }
-        else if (s == "GPUHybrid" || s == "CPUHybrid")
+        else if (s == "GPUHybrid" || s == "CPUHybrid" || s == "RestartedAMGPCG")
         {
             params[s]["relative_tolerance"] = 0.0;
             params[s]["absolute_tolerance"] = 1e-8;
@@ -455,6 +456,146 @@ TEST_CASE("block_mapping", "[.][solver]")
         REQUIRE(mapped_info["num_iterations"] == baseline_info["num_iterations"]);
     }
 }
+
+#ifdef POLYSOLVE_WITH_GPU_HYBRID
+// RestartedAMGPCG recomputes b - Ax in double-double precision every
+// restart_interval iterations, restarts CG from it, and only declares
+// convergence on that recomputed residual. Checks that it converges both with
+// frequent restarts and with (effectively) none, that it restarts at least as
+// often as restart_interval says, and that the residual it reports matches
+// one computed in quad precision on the host.
+TEST_CASE("restarted_amg_pcg", "[solver]")
+{
+    const std::string path = POLYFEM_DATA_DIR;
+    Eigen::SparseMatrix<double> A;
+    const bool ok = loadMarket(A, path + "/A_2.mat");
+    REQUIRE(ok);
+
+    Eigen::VectorXd b(A.rows());
+    b.setRandom();
+
+    for (const int restart_interval : {5, 50, 1000000})
+    {
+        auto solver = Solver::create("RestartedAMGPCG", "");
+        json params;
+        params["RestartedAMGPCG"]["relative_tolerance"] = 0;
+        params["RestartedAMGPCG"]["absolute_tolerance"] = 1e-10;
+        params["RestartedAMGPCG"]["restart_interval"] = restart_interval;
+        solver->set_parameters(params);
+
+        Eigen::VectorXd x(b.size());
+        x.setZero();
+
+        solver->analyze_pattern(A, A.rows());
+        solver->factorize(A);
+        solver->solve(b, x);
+
+        json info;
+        solver->get_info(info);
+        const int num_iterations = info["num_iterations"];
+        const int num_restarts = info["num_restarts"];
+        const double final_res_norm = info["final_res_norm"];
+
+        INFO("restart_interval: " << restart_interval << ", num_iterations: " << num_iterations << ", num_restarts: " << num_restarts);
+        REQUIRE(final_res_norm < 1e-10);
+        REQUIRE(num_restarts >= num_iterations / restart_interval);
+
+#ifdef __SIZEOF_FLOAT128__
+        // A product of two doubles is exact in binary128, so this reference
+        // residual is accurate to ~1e-34 relative to |A||x|, far beyond both
+        // the double-double residual and the tolerance here.
+        const Eigen::SparseMatrix<double, Eigen::RowMajor> A_rows = A;
+        __float128 ref_sq_norm = 0;
+        for (int i = 0; i < A_rows.outerSize(); ++i)
+        {
+            __float128 r_i = b[i];
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_rows, i); it; ++it)
+                r_i -= static_cast<__float128>(it.value()) * static_cast<__float128>(x[it.col()]);
+            ref_sq_norm += r_i * r_i;
+        }
+        const double ref_res_norm = std::sqrt(static_cast<double>(ref_sq_norm));
+
+        INFO("reported residual: " << final_res_norm << ", quad-precision residual: " << ref_res_norm << ", double-precision residual: " << (A * x - b).norm());
+        REQUIRE(std::abs(final_res_norm - ref_res_norm) <= 1e-10 * ref_res_norm);
+#endif
+    }
+
+    {
+        auto solver = Solver::create("RestartedAMGPCG", "");
+        json params;
+        params["RestartedAMGPCG"]["restart_interval"] = 0;
+        REQUIRE_THROWS(solver->set_parameters(params));
+    }
+}
+#endif
+
+#if defined(POLYSOLVE_WITH_CPU_HYBRID) && defined(POLYSOLVE_WITH_STRUMPACK)
+// use_strumpack hands every subdomain over 1000 dofs to STRUMPACK, but the
+// default selection only picks ~700 dofs of A_contact.mtx. So pick the
+// subspace here instead -- the 1200 dofs with the largest L1 row norm, the
+// same heuristic with a wider cut -- and hand it over as a single subdomain
+// (AMGF mode, no decomposition or expansion). Uncompressed, STRUMPACK's LU and
+// the default LDLT factorize the same subdomain matrix, so PCG should need the
+// same number of iterations up to rounding; compressed, it only has to converge.
+TEST_CASE("cpu_hybrid_strumpack", "[.][solver]")
+{
+    const std::string path = POLYFEM_DATA_DIR;
+    Eigen::SparseMatrix<double> A;
+    const bool ok = loadMarket(A, path + "/A_contact.mtx");
+    REQUIRE(ok);
+
+    // A is symmetric, so its column norms are its row norms.
+    std::vector<std::pair<double, int>> row_norms;
+    for (int k = 0; k < A.outerSize(); ++k)
+        row_norms.emplace_back(A.col(k).cwiseAbs().sum(), k);
+    std::sort(row_norms.rbegin(), row_norms.rend());
+
+    std::set<int> bad_dofs;
+    for (int i = 0; i < 1200; ++i)
+        bad_dofs.insert(row_norms[i].second);
+
+    Eigen::VectorXd b(A.rows());
+    b.setRandom();
+
+    const auto solve = [&](const bool use_strumpack, const std::string &compression, json &info) {
+        auto solver = Solver::create("CPUHybrid", "");
+        json params;
+        params["CPUHybrid"]["relative_tolerance"] = 0;
+        params["CPUHybrid"]["absolute_tolerance"] = 1e-12;
+        params["CPUHybrid"]["select_bad_dofs_from_l1_norm"] = false;
+        params["CPUHybrid"]["decompose_subdomains"] = false;
+        params["CPUHybrid"]["expand_subdomains"] = false;
+        params["CPUHybrid"]["use_strumpack"] = use_strumpack;
+        params["CPUHybrid"]["strumpack_compression"] = compression;
+
+        solver->set_block_size(3);
+        solver->set_parameters(params);
+        solver->set_problematic_dofs(bad_dofs);
+
+        Eigen::VectorXd x(b.size());
+        x.setZero();
+        solver->analyze_pattern(A, A.rows());
+        solver->factorize(A);
+        solver->solve(b, x);
+
+        solver->get_info(info);
+        return (A * x - b).norm();
+    };
+
+    json baseline_info, strumpack_info, blr_info;
+    const double baseline_err = solve(false, "none", baseline_info);
+    const double strumpack_err = solve(true, "none", strumpack_info);
+    const double blr_err = solve(true, "blr", blr_info);
+
+    REQUIRE(baseline_err < 1e-4);
+    REQUIRE(strumpack_err < 1e-4);
+    REQUIRE(blr_err < 1e-4);
+
+    const int baseline_iters = baseline_info["num_iterations"];
+    const int strumpack_iters = strumpack_info["num_iterations"];
+    REQUIRE(std::abs(strumpack_iters - baseline_iters) <= 2);
+}
+#endif
 
 TEST_CASE("pre_factor", "[solver]")
 {

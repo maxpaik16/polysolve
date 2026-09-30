@@ -9,6 +9,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <numeric>
 
 #include <HYPRE_utilities.h>
@@ -20,6 +21,10 @@
 
 #if POLYSOLVE_WITH_MKL
 #include <Eigen/PardisoSupport>
+#endif
+
+#ifdef POLYSOLVE_WITH_STRUMPACK
+#include <StrumpackSparseSolver.hpp>
 #endif
 
 #include <chrono>
@@ -41,6 +46,91 @@ namespace polysolve::linear
         {
             return std::chrono::duration<double>(clock::now() - begin).count();
         }
+
+#ifdef POLYSOLVE_WITH_STRUMPACK
+        // A subdomain factorized by STRUMPACK, under use_strumpack. Only the
+        // rank that owns the subdomain -- a thread of this process -- ever
+        // touches it, and STRUMPACK is built without MPI or OpenMP, so it runs
+        // sequentially on that thread.
+        //
+        // Note that STRUMPACK's solver installs a process-wide new-handler
+        // for its lifetime, which aborts on out-of-memory rather than
+        // throwing std::bad_alloc.
+        class StrumpackWrapper : public AbstractSolver
+        {
+            strumpack::StrumpackSparseSolver<double, int> solver{/*verbose=*/false};
+
+        public:
+            StrumpackWrapper(CPUHybridSolver::StrumpackCompression compression, double compression_rel_tol)
+            {
+                auto &opts = solver.options();
+
+                // Apply the factorization exactly once per solve. The default
+                // (AUTO) wraps it in iterative refinement -- or, once
+                // compressed, in GMRES -- which would make this preconditioner
+                // nonlinear under PCG.
+                opts.set_Krylov_solver(strumpack::KrylovSolver::DIRECT);
+                // Subdomains are principal submatrices of an SPD system, so
+                // their diagonal needs no help from MC64's row permutation,
+                // which would only throw away their symmetry.
+                opts.set_matching(strumpack::MatchingJob::NONE);
+
+                switch (compression)
+                {
+                case CPUHybridSolver::StrumpackCompression::NONE:
+                    opts.set_compression(strumpack::CompressionType::NONE);
+                    break;
+                case CPUHybridSolver::StrumpackCompression::BLR:
+                    opts.set_compression(strumpack::CompressionType::BLR);
+                    break;
+                case CPUHybridSolver::StrumpackCompression::HSS:
+                    opts.set_compression(strumpack::CompressionType::HSS);
+                    break;
+                }
+                opts.set_compression_rel_tol(compression_rel_tol);
+            }
+
+            void compute(const Eigen::SparseMatrix<double> &A) override
+            {
+                // STRUMPACK takes CSR, and keeps a copy of its own.
+                Eigen::SparseMatrix<double, Eigen::RowMajor> A_csr = A;
+                A_csr.makeCompressed();
+
+                // Don't promise a symmetric pattern: an assembled matrix can
+                // store an explicit zero on one side of the diagonal only,
+                // and STRUMPACK would trust the promise.
+                solver.set_csr_matrix(A_csr.rows(), A_csr.outerIndexPtr(), A_csr.innerIndexPtr(), A_csr.valuePtr(), /*symmetric_pattern=*/false);
+
+                // The reordering is METIS nested dissection, and METIS keeps
+                // its random number generator in a process-wide static that
+                // the other ranks' subdomains, reordered at the same time,
+                // would race on. So reorder one subdomain at a time; METIS
+                // reseeds on every call, which also makes the orderings
+                // deterministic. The numeric factorization stays concurrent.
+                strumpack::ReturnCode status;
+                {
+                    static std::mutex metis_mutex;
+                    std::lock_guard<std::mutex> lock(metis_mutex);
+                    status = solver.reorder();
+                }
+                if (status == strumpack::ReturnCode::SUCCESS)
+                {
+                    status = solver.factor();
+                }
+                if (status != strumpack::ReturnCode::SUCCESS)
+                {
+                    SPDLOG_ERROR("[CPUHybrid] STRUMPACK failed to factorize a subdomain of size {} (return code {})", A.rows(), static_cast<int>(status));
+                }
+            }
+
+            Eigen::VectorXd solve(const Eigen::VectorXd &b) override
+            {
+                Eigen::VectorXd x(b.size());
+                solver.solve(b.data(), x.data());
+                return x;
+            }
+        };
+#endif
     } // namespace
 
     // Workers (nanompi ranks 1..N-1, each a thread of this process) run the
@@ -234,6 +324,34 @@ namespace polysolve::linear
             {
                 ras_correction = shared_params["CPUHybrid"]["ras_correction"];
             }
+            if (shared_params["CPUHybrid"].contains("use_strumpack"))
+            {
+                use_strumpack = shared_params["CPUHybrid"]["use_strumpack"];
+            }
+            if (shared_params["CPUHybrid"].contains("strumpack_compression"))
+            {
+                const std::string compression_str = shared_params["CPUHybrid"]["strumpack_compression"];
+                if (compression_str == "none")
+                {
+                    strumpack_compression = StrumpackCompression::NONE;
+                }
+                else if (compression_str == "blr")
+                {
+                    strumpack_compression = StrumpackCompression::BLR;
+                }
+                else if (compression_str == "hss")
+                {
+                    strumpack_compression = StrumpackCompression::HSS;
+                }
+                else
+                {
+                    throw std::runtime_error("Unknown STRUMPACK compression: " + compression_str);
+                }
+            }
+            if (shared_params["CPUHybrid"].contains("strumpack_compression_rel_tol"))
+            {
+                strumpack_compression_rel_tol = shared_params["CPUHybrid"]["strumpack_compression_rel_tol"];
+            }
             if (shared_params["CPUHybrid"].contains("detailed_log"))
             {
                 detailed_log = shared_params["CPUHybrid"]["detailed_log"];
@@ -298,6 +416,13 @@ namespace polysolve::linear
         {
             throw std::runtime_error("contact_patch_schwarz and ras_correction cannot both be enabled!");
         }
+
+#ifndef POLYSOLVE_WITH_STRUMPACK
+        if (use_strumpack)
+        {
+            throw std::runtime_error("use_strumpack requires polysolve to be built with POLYSOLVE_WITH_STRUMPACK=ON!");
+        }
+#endif
     }
 
     void CPUHybridSolver::get_info(json &params) const
@@ -1208,6 +1333,13 @@ namespace polysolve::linear
         {
             if (bad_indices_sets[i].size() > 1000)
             {
+#ifdef POLYSOLVE_WITH_STRUMPACK
+                if (use_strumpack)
+                {
+                    D_solvers.push_back(std::make_unique<StrumpackWrapper>(strumpack_compression, strumpack_compression_rel_tol));
+                    continue;
+                }
+#endif
 #if POLYSOLVE_WITH_MKL
                 D_solvers.push_back(std::make_unique<EigenWrapper<Eigen::PardisoLDLT<Eigen::SparseMatrix<double>>>>());
 #elif POLYSOLVE_WITH_ACCELERATE

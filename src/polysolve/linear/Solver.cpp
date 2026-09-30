@@ -71,6 +71,7 @@ namespace polysolve::linear
 #endif
 #ifdef POLYSOLVE_WITH_GPU_HYBRID
 #include "GPUHybridSolver.hpp"
+#include "RestartedAMGPCG.hpp"
 #endif
 #ifdef POLYSOLVE_WITH_CUDSS
 #include "cuDSS.hpp"
@@ -424,6 +425,10 @@ namespace polysolve::linear
         else if (solver == "GPUHybrid")
         {
             return std::make_unique<GPUHybridSolver>();
+        }
+        else if (solver == "RestartedAMGPCG")
+        {
+            return std::make_unique<RestartedAMGPCG>();
 #endif
 #ifdef POLYSOLVE_WITH_CPU_HYBRID
         }
@@ -578,6 +583,7 @@ namespace polysolve::linear
 #endif
 #ifdef POLYSOLVE_WITH_GPU_HYBRID
             "GPUHybrid",
+            "RestartedAMGPCG",
 #endif
 #ifdef POLYSOLVE_WITH_CPU_HYBRID
             "CPUHybrid",

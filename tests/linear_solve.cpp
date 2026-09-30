@@ -6,6 +6,7 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <unsupported/Eigen/SparseExtra>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <fcntl.h>
@@ -130,6 +131,36 @@ namespace
         return rhs;
     }
 
+    // A * x with every product and partial sum's rounding error recovered
+    // exactly (TwoProduct via std::fma, Knuth's TwoSum; Ogita, Rump & Oishi's
+    // Dot2) and accumulated separately, so each entry is as accurate as if
+    // computed in twice double precision and rounded once. Used for b = A *
+    // x_true, to keep x_true as close as possible to the exact solution of
+    // Ax = b. (Assumes no FP contraction of the plain + and * below into an
+    // FMA, which holds unless built with -mfma/-march=native.)
+    Eigen::VectorXd multiply_accurately(const Eigen::SparseMatrix<double> &A, const Eigen::VectorXd &x)
+    {
+        Eigen::VectorXd hi = Eigen::VectorXd::Zero(A.rows());
+        Eigen::VectorXd lo = Eigen::VectorXd::Zero(A.rows());
+        for (int k = 0; k < A.outerSize(); ++k)
+        {
+            for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it)
+            {
+                const double prod = it.value() * x[it.col()];
+                const double prod_err = std::fma(it.value(), x[it.col()], -prod);
+
+                const double old_hi = hi[it.row()];
+                const double sum = old_hi + prod;
+                const double bb = sum - old_hi;
+                const double sum_err = (old_hi - (sum - bb)) + (prod - bb);
+
+                hi[it.row()] = sum;
+                lo[it.row()] += sum_err + prod_err;
+            }
+        }
+        return hi + lo;
+    }
+
     size_t getPeakRSS()
     {
         struct rusage rusage;
@@ -155,6 +186,14 @@ int main(int argc, char *argv[])
         .scan<'i', long long>()
         .nargs(argparse::nargs_pattern::optional)
         .help("Generate a random RHS instead of loading -b. Optionally provide a seed.");
+    rhs_group.add_argument("--x_true")
+        .metavar("x_true.mtx")
+        .help("Matrix Market vector used as the known solution: the RHS is set to A * x_true "
+              "(accumulated in twice double precision, rounded once) instead of loading -b, "
+              "and each solve's error against x_true is reported.");
+    program.add_argument("-o", "--output")
+        .metavar("x.mtx")
+        .help("Optional Matrix Market vector file to write the solution of the last (timed) solve to.");
     program.add_argument("-i")
         .metavar("problem_info.mtx")
         .help("Optional Matrix Market vector used to derive the problematic DOFs passed to "
@@ -170,6 +209,11 @@ int main(int argc, char *argv[])
     program.add_argument("-j")
         .metavar("spec.json")
         .help("Optional solver JSON config. Defaults to {\"solver\":\"Eigen::SimplicialLDLT\"}.");
+    program.add_argument("--block_size")
+        .scan<'i', int>()
+        .metavar("block_size")
+        .help("Optional block size passed to Solver::set_block_size (e.g. 3 for 3D elasticity). "
+              "Defaults to the solver's own.");
     program.add_argument("-w")
         .default_value(1)
         .scan<'i', int>()
@@ -269,7 +313,22 @@ int main(int argc, char *argv[])
     A.makeCompressed();
 
     Eigen::VectorXd b(A.rows());
-    if (program.present("-b"))
+    std::optional<Eigen::VectorXd> x_true;
+    if (program.present("--x_true"))
+    {
+        const std::string x_true_path = program.get<std::string>("--x_true");
+        x_true.emplace(A.rows());
+        if (!Eigen::loadMarketVector(*x_true, x_true_path))
+        {
+            throw std::runtime_error("failed to load matrix market x_true: " + x_true_path);
+        }
+        if (x_true->size() != A.rows())
+        {
+            throw std::runtime_error("x_true dimension mismatch");
+        }
+        b = multiply_accurately(A, *x_true);
+    }
+    else if (program.present("-b"))
     {
         const std::string rhs_path = program.get<std::string>("-b");
         if (!Eigen::loadMarketVector(b, rhs_path))
@@ -325,6 +384,10 @@ int main(int argc, char *argv[])
     // that cost (and, for CPUHybrid, don't race tearing the team down and
     // immediately rebuilding it) on every -w/-r iteration.
     auto solver = Solver::create(solver_config, *logger);
+    if (const auto block_size = program.present<int>("--block_size"))
+    {
+        solver->set_block_size(*block_size);
+    }
     solver->set_problematic_dofs(problem_specific_bad_dofs);
 
     const int iterations = warmup + repeat;
@@ -365,6 +428,25 @@ int main(int argc, char *argv[])
         solver->solve(b, x);
         double residual = (b - A * x).norm();
         SPDLOG_INFO("[{}] [residual={}] [peak_memory={}]", solver->name(), residual, getPeakRSS());
+
+        if (x_true.has_value())
+        {
+            // The energy norm is the one CG minimizes the error in.
+            const Eigen::VectorXd error = x - *x_true;
+            const double rel_error = error.norm() / x_true->norm();
+            const double rel_error_inf = error.lpNorm<Eigen::Infinity>() / x_true->lpNorm<Eigen::Infinity>();
+            const double rel_error_energy = std::sqrt(error.dot(A * error) / x_true->dot(A * *x_true));
+            SPDLOG_INFO("[{}] [x_error] [rel_error={}] [rel_error_inf={}] [rel_error_energy={}]", solver->name(), rel_error, rel_error_inf, rel_error_energy);
+        }
+    }
+
+    if (program.present("-o"))
+    {
+        const std::string output_path = program.get<std::string>("-o");
+        if (!Eigen::saveMarketVector(x, output_path))
+        {
+            throw std::runtime_error("failed to write matrix market solution: " + output_path);
+        }
     }
 
     return 0;

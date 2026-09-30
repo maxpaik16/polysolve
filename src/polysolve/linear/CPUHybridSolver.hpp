@@ -142,6 +142,15 @@ namespace polysolve::linear
             APOSTERIORI
         };
 
+        // Low-rank compression of STRUMPACK's frontal matrices, under
+        // use_strumpack. NONE is an exact LU factorization.
+        enum class StrumpackCompression
+        {
+            NONE,
+            BLR,
+            HSS
+        };
+
     protected:
         // AMG settings
         double theta = 0.5;
@@ -175,6 +184,13 @@ namespace polysolve::linear
         // same bad-dof set as AMGF/select_bad_dofs. Mutually exclusive with
         // contact_patch_schwarz.
         bool ras_correction = false;
+        // Experimental: factorize the large subdomains -- the ones that would
+        // otherwise go to Pardiso/Accelerate -- with STRUMPACK's multifrontal
+        // LU instead, optionally with low-rank compression of its fronts.
+        // Needs polysolve built with POLYSOLVE_WITH_STRUMPACK.
+        bool use_strumpack = false;
+        StrumpackCompression strumpack_compression = StrumpackCompression::NONE;
+        double strumpack_compression_rel_tol = 1e-4;
 
         // General solver settings
         int dimension_ = 1; // 1 = scalar (Laplace), 2 or 3 = vector (Elasticity)

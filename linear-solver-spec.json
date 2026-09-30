@@ -18,7 +18,8 @@
             "AMGCL",
             "MAS",
             "CPUHybrid",
-            "GPUHybrid"
+            "GPUHybrid",
+            "RestartedAMGPCG"
         ],
         "doc": "Settings for the linear solver."
     },
@@ -53,7 +54,8 @@
             "Eigen::MINRES",
             "MAS",
             "CPUHybrid",
-            "GPUHybrid"
+            "GPUHybrid",
+            "RestartedAMGPCG"
         ]
     },
     {
@@ -515,6 +517,9 @@
             "contact_patch_schwarz",
             "contact_patch_remove_covered",
             "ras_correction",
+            "use_strumpack",
+            "strumpack_compression",
+            "strumpack_compression_rel_tol",
             "detailed_log"
         ],
         "doc": "Settings for the CPUHybrid solver."
@@ -633,6 +638,29 @@
         "default": false,
         "type": "bool",
         "doc": "Restricted Additive Schwarz correction: use the same problematic dof set as AMGF/select_bad_dofs, but build one subdomain per dof (every dof with a nonzero entry in that dof's row) and let each subdomain correct only the single dof it was built around, instead of merging dofs into shared clusters. Mutually exclusive with contact_patch_schwarz."
+    },
+    {
+        "pointer": "/CPUHybrid/use_strumpack",
+        "default": false,
+        "type": "bool",
+        "doc": "Experimental: factorize every subdomain larger than 1000 dofs with STRUMPACK's sparse multifrontal LU instead of Pardiso/Accelerate (smaller subdomains keep using SimplicialLDLT). Requires polysolve to be built with POLYSOLVE_WITH_STRUMPACK."
+    },
+    {
+        "pointer": "/CPUHybrid/strumpack_compression",
+        "default": "none",
+        "type": "string",
+        "options": [
+            "none",
+            "blr",
+            "hss"
+        ],
+        "doc": "Only used when use_strumpack is enabled. Low-rank compression of STRUMPACK's frontal matrices: none (exact LU), blr (block low-rank) or hss (hierarchically semi-separable). STRUMPACK only compresses fronts whose separator has at least 512 (blr) or 1000 (hss) dofs, so small subdomains are factorized exactly either way. A compressed factorization is not exactly symmetric, so PCG's convergence guarantees no longer strictly hold."
+    },
+    {
+        "pointer": "/CPUHybrid/strumpack_compression_rel_tol",
+        "default": 1e-4,
+        "type": "float",
+        "doc": "Only used when strumpack_compression is not none. Relative tolerance of the low-rank compression."
     },
     {
         "pointer": "/CPUHybrid/detailed_log",
@@ -773,5 +801,56 @@
         "default": true,
         "type": "bool",
         "doc": "If false, skip the per-PCG-iteration timing logs (matmul, amg_v_cycle, subdomain_solve, contact_patch_dense_subdomain_solve, pcg_iter) so a long solve doesn't flood the log; every other log line is unaffected."
+    },
+    {
+        "pointer": "/RestartedAMGPCG",
+        "default": null,
+        "type": "object",
+        "optional": [
+            "max_iter",
+            "relative_tolerance",
+            "absolute_tolerance",
+            "theta",
+            "restart_interval",
+            "detailed_log"
+        ],
+        "doc": "Settings for the RestartedAMGPCG solver: GPU BoomerAMG-preconditioned CG (AMG set up as in GPUHybrid, without its subspace correction), periodically restarted from the true residual recomputed in double-double precision."
+    },
+    {
+        "pointer": "/RestartedAMGPCG/max_iter",
+        "default": 10000,
+        "type": "int",
+        "doc": "Maximum number of PCG iterations, summed over all restarts."
+    },
+    {
+        "pointer": "/RestartedAMGPCG/relative_tolerance",
+        "default": 1e-10,
+        "type": "float",
+        "doc": "Relative tolerance for solver convergence, checked against the double-double precision residual."
+    },
+    {
+        "pointer": "/RestartedAMGPCG/absolute_tolerance",
+        "default": 0,
+        "type": "float",
+        "doc": "Absolute tolerance for solver convergence, checked against the double-double precision residual."
+    },
+    {
+        "pointer": "/RestartedAMGPCG/theta",
+        "default": 0.5,
+        "type": "float",
+        "doc": "Strong threshold for AMG."
+    },
+    {
+        "pointer": "/RestartedAMGPCG/restart_interval",
+        "default": 50,
+        "type": "int",
+        "min": 1,
+        "doc": "Every restart_interval PCG iterations (or sooner, whenever the recursively-updated residual reaches the tolerance), recompute the true residual b - Ax in double-double precision and restart PCG from it. Convergence is only declared on this recomputed residual."
+    },
+    {
+        "pointer": "/RestartedAMGPCG/detailed_log",
+        "default": true,
+        "type": "bool",
+        "doc": "If false, skip the per-PCG-iteration timing logs (matmul, amg_v_cycle, pcg_iter) so a long solve doesn't flood the log; every other log line, including the per-restart residual log, is unaffected."
     }
 ]
