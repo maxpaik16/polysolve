@@ -805,3 +805,64 @@ TEST_CASE("track-info-off", "[solver]")
         }
     }
 }
+
+TEST_CASE("newton-perturbed-linear-solve", "[solver][newton]")
+{
+    // perturb_target_residual adds a random vector to the linear solver's solution so that the
+    // Newton residual ‖HΔx + g‖ hits the requested target (relative to ‖g‖ here). On a quadratic,
+    // a full step then reduces the gradient by exactly that factor.
+    static std::shared_ptr<spdlog::logger> logger = spdlog::stdout_color_mt("perturbed-newton-test");
+    logger->set_level(spdlog::level::warn);
+
+    const double eta = 0.1;
+
+    for (const std::string solver_name : {"Newton", "DenseNewton"})
+    {
+        json linear_solver_params;
+        linear_solver_params["solver"] = solver_name == "Newton" ? "Eigen::SimplicialLDLT" : "Eigen::LDLT";
+
+        std::vector<TestProblem::TVector> results;
+        for (const int seed : {0, 0, 1})
+        {
+            json solver_params;
+            solver_params["solver"] = json::array({{
+                {"type", solver_name},
+                {"perturb_target_residual", eta},
+                {"perturb_relative", true},
+                {"perturb_seed", seed},
+            }});
+            solver_params["line_search"]["method"] = "Backtracking";
+            solver_params["max_iterations"] = 100;
+            solver_params["grad_norm_tol"] = 1e-8;
+            solver_params["rel_grad_norm_tol"] = 0;
+
+            QuadraticProblem problem;
+            TestProblem::TVector x(problem.size());
+            x.setZero();
+
+            auto solver = Solver::create(solver_params, linear_solver_params, 1, *logger);
+            REQUIRE_NOTHROW(solver->minimize(problem, x));
+
+            CHECK((x - problem.solutions()[0]).norm() < 1e-7);
+
+            const json &info = solver->info()["internal_solver"];
+            // An exact solve would converge in one iteration.
+            CHECK(info.size() > 3);
+            for (const json &entry : info)
+            {
+                REQUIRE(entry.contains("perturbation"));
+                const json &p = entry["perturbation"];
+                CHECK(p["unperturbed_residual"].get<double>() < 1e-10);
+                CHECK(p["alpha"].get<double>() > 0);
+                CHECK(p["perturbed_residual"].get<double>()
+                      == Approx(p["target_residual"].get<double>()).epsilon(1e-8));
+            }
+
+            results.push_back(x);
+        }
+
+        // Same seed, same iterates; a different seed gives different ones.
+        CHECK(results[0] == results[1]);
+        CHECK(results[0] != results[2]);
+    }
+}

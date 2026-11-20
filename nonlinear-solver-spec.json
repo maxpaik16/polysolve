@@ -174,7 +174,10 @@
             "reg_weight_inc",
             "force_psd_projection",
             "use_psd_projection",
-            "use_psd_projection_in_regularized"
+            "use_psd_projection_in_regularized",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for Newton."
     },
@@ -219,6 +222,26 @@
         "default": true,
         "type": "bool",
         "doc": "Use PSD in regularized Newton."
+    },
+    {
+        "pointer": "/Newton/perturb_target_residual",
+        "default": 0,
+        "type": "float",
+        "min": 0,
+        "doc": "Experimental: if > 0, add a random (Gaussian) vector to the linear solver's solution so that the Newton linear-system residual ‖HΔx + g‖ equals this target. The scaling is found by bisection in the problem's gradient norm. Solves whose residual is already at or above the target are left unchanged. 0 disables the perturbation."
+    },
+    {
+        "pointer": "/Newton/perturb_relative",
+        "default": true,
+        "type": "bool",
+        "doc": "If true, perturb_target_residual is relative to the gradient norm ‖g‖; otherwise it is an absolute residual."
+    },
+    {
+        "pointer": "/Newton/perturb_seed",
+        "default": 0,
+        "type": "int",
+        "min": 0,
+        "doc": "Seed of the random number generator used for the linear-solve perturbation."
     },
     {
         "pointer": "/ADAM",
@@ -327,7 +350,10 @@
             "type"
         ],
         "optional": [
-            "residual_tolerance"
+            "residual_tolerance",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for Newton."
     },
@@ -339,7 +365,10 @@
             "type"
         ],
         "optional": [
-            "residual_tolerance"
+            "residual_tolerance",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for projected Newton."
     },
@@ -354,7 +383,10 @@
             "residual_tolerance",
             "reg_weight_min",
             "reg_weight_max",
-            "reg_weight_inc"
+            "reg_weight_inc",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for regularized Newton."
     },
@@ -369,7 +401,10 @@
             "residual_tolerance",
             "reg_weight_min",
             "reg_weight_max",
-            "reg_weight_inc"
+            "reg_weight_inc",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for regularized projected Newton."
     },
@@ -381,7 +416,10 @@
             "type"
         ],
         "optional": [
-            "residual_tolerance"
+            "residual_tolerance",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for Newton."
     },
@@ -393,7 +431,10 @@
             "type"
         ],
         "optional": [
-            "residual_tolerance"
+            "residual_tolerance",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for projected Newton."
     },
@@ -408,7 +449,10 @@
             "residual_tolerance",
             "reg_weight_min",
             "reg_weight_max",
-            "reg_weight_inc"
+            "reg_weight_inc",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for regularized Newton."
     },
@@ -423,7 +467,10 @@
             "residual_tolerance",
             "reg_weight_min",
             "reg_weight_max",
-            "reg_weight_inc"
+            "reg_weight_inc",
+            "perturb_target_residual",
+            "perturb_relative",
+            "perturb_seed"
         ],
         "doc": "Options for projected regularized Newton."
     },
@@ -544,6 +591,26 @@
         "default": 10,
         "type": "float",
         "doc": "Regulariztion weight increment."
+    },
+    {
+        "pointer": "/solver/*/perturb_target_residual",
+        "default": 0,
+        "type": "float",
+        "min": 0,
+        "doc": "Experimental: if > 0, add a random (Gaussian) vector to the linear solver's solution so that the Newton linear-system residual ‖HΔx + g‖ equals this target. The scaling is found by bisection in the problem's gradient norm. Solves whose residual is already at or above the target are left unchanged. 0 disables the perturbation."
+    },
+    {
+        "pointer": "/solver/*/perturb_relative",
+        "default": true,
+        "type": "bool",
+        "doc": "If true, perturb_target_residual is relative to the gradient norm ‖g‖; otherwise it is an absolute residual."
+    },
+    {
+        "pointer": "/solver/*/perturb_seed",
+        "default": 0,
+        "type": "int",
+        "min": 0,
+        "doc": "Seed of the random number generator used for the linear-solve perturbation."
     },
     {
         "pointer": "/solver/*/erase_component_probability",

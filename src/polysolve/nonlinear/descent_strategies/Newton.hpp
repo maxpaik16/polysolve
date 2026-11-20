@@ -5,6 +5,8 @@
 
 #include <polysolve/linear/Solver.hpp>
 
+#include <random>
+
 namespace polysolve::nonlinear
 {
     class Newton : public DescentStrategy
@@ -22,8 +24,11 @@ namespace polysolve::nonlinear
             const int dimension = 1);
 
     protected:
+        /// @param params_key Key of this strategy's options in solver_params ("Newton",
+        ///                   "ProjectedNewton", or "RegularizedNewton"). If the key is absent,
+        ///                   the options are read from solver_params directly (list form).
         Newton(const bool sparse,
-               const double residual_tolerance,
+               const std::string &params_key,
                const json &solver_params,
                const json &linear_solver_params,
                const double characteristic_length,
@@ -50,12 +55,39 @@ namespace polysolve::nonlinear
                                          const TVector &x, const TVector &grad,
                                          TVector &direction);
 
+        /// Adds alpha * v to the direction, choosing alpha > 0 so that the linear-system
+        /// residual ‖H (direction + alpha v) + g‖ equals the target perturbation residual.
+        /// @param r0 Unperturbed residual vector H direction + g.
+        /// @param v  Random perturbation direction.
+        /// @param w  H v.
+        /// @param info Receives perturbation statistics (when tracking info).
+        void apply_perturbation(const Problem &objFunc,
+                                const TVector &grad,
+                                const TVector &r0,
+                                const TVector &v,
+                                const TVector &w,
+                                TVector &direction,
+                                json &info) const;
+
+        /// Draw a standard normal random vector of the given size.
+        TVector random_perturbation(const int size);
+
+        bool perturbation_enabled() const { return perturb_target_residual > 0; }
+
         json internal_solver_info = json::array();
 
         const bool is_sparse;
         const double characteristic_length;
         double residual_tolerance;
         const NormType norm_type;
+
+        /// Random perturbation of the linear solve (for experimenting with inexact Newton steps).
+        /// When perturb_target_residual > 0, a random vector is added to the linear solver's
+        /// solution so that the residual reaches perturb_target_residual (relative to ‖∇f‖ if
+        /// perturb_relative is true).
+        double perturb_target_residual = 0;
+        bool perturb_relative = true;
+        std::mt19937_64 perturb_rng;
 
         std::unique_ptr<polysolve::linear::Solver> linear_solver; ///< Linear solver used to solve the linear system
 

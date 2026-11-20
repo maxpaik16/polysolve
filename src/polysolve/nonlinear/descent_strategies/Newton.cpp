@@ -12,6 +12,23 @@
 
 namespace polysolve::nonlinear
 {
+    namespace
+    {
+        /// Options of one Newton strategy: solver_params[key] if present, else solver_params
+        /// itself (the list form, where each entry holds its own options).
+        const json &strategy_params(const std::string &key, const json &solver_params)
+        {
+            const auto it = solver_params.find(key);
+            return it != solver_params.end() ? *it : solver_params;
+        }
+
+        template <typename T>
+        T param_or(const json &params, const std::string &name, const T &default_value)
+        {
+            const auto it = params.find(name);
+            return it != params.end() && !it->is_null() ? it->template get<T>() : default_value;
+        }
+    } // namespace
 
     std::vector<std::shared_ptr<DescentStrategy>> Newton::create_solver(
         const bool sparse,
@@ -31,6 +48,16 @@ namespace polysolve::nonlinear
         reg_solver_params["RegularizedNewton"]["reg_weight_min"] = solver_params["Newton"]["reg_weight_min"];
         reg_solver_params["RegularizedNewton"]["reg_weight_max"] = solver_params["Newton"]["reg_weight_max"];
         reg_solver_params["RegularizedNewton"]["reg_weight_inc"] = solver_params["Newton"]["reg_weight_inc"];
+
+        // The fallback strategies use the same linear-solve perturbation as the main Newton.
+        for (const std::string name : {"perturb_target_residual", "perturb_relative", "perturb_seed"})
+        {
+            if (solver_params["Newton"].contains(name))
+            {
+                proj_solver_params["ProjectedNewton"][name] = solver_params["Newton"][name];
+                reg_solver_params["RegularizedNewton"][name] = solver_params["Newton"][name];
+            }
+        }
 
         std::vector<std::shared_ptr<DescentStrategy>> res;
         const bool force_psd_projection = solver_params["Newton"]["force_psd_projection"];
@@ -61,7 +88,7 @@ namespace polysolve::nonlinear
     }
 
     Newton::Newton(const bool sparse,
-                   const double residual_tolerance,
+                   const std::string &params_key,
                    const json &solver_params,
                    const json &linear_solver_params,
                    const double characteristic_length,
@@ -69,8 +96,14 @@ namespace polysolve::nonlinear
                    const NormType norm_type,
                    const int dimension)
         : Superclass(solver_params, characteristic_length, logger),
-          is_sparse(sparse), characteristic_length(characteristic_length), residual_tolerance(residual_tolerance), norm_type(norm_type)
+          is_sparse(sparse), characteristic_length(characteristic_length),
+          residual_tolerance(extract_param(params_key, "residual_tolerance", solver_params)), norm_type(norm_type)
     {
+        const json &params = strategy_params(params_key, solver_params);
+        perturb_target_residual = param_or<double>(params, "perturb_target_residual", 0.0);
+        perturb_relative = param_or<bool>(params, "perturb_relative", true);
+        perturb_rng.seed(param_or<uint64_t>(params, "perturb_seed", 0));
+
         linear_solver = polysolve::linear::Solver::create(linear_solver_params, logger, true, dimension);
 
         if (linear_solver->is_dense() == sparse)
@@ -78,6 +111,13 @@ namespace polysolve::nonlinear
 
         if (residual_tolerance <= 0)
             log_and_throw_error(logger, "Newton residual_tolerance must be > 0, instead got {}", residual_tolerance);
+
+        if (perturb_target_residual < 0 || !std::isfinite(perturb_target_residual))
+            log_and_throw_error(logger, "Newton perturb_target_residual must be >= 0, instead got {}", perturb_target_residual);
+
+        if (perturbation_enabled())
+            m_logger.info("[{}] perturbing linear solves to a {} residual of {:g}",
+                          params_key, perturb_relative ? "relative" : "absolute", perturb_target_residual);
     }
 
     Newton::Newton(
@@ -88,7 +128,7 @@ namespace polysolve::nonlinear
         spdlog::logger &logger,
         const NormType norm_type,
         const int dimension)
-        : Newton(sparse, extract_param("Newton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger, norm_type, dimension)
+        : Newton(sparse, "Newton", solver_params, linear_solver_params, characteristic_length, logger, norm_type, dimension)
     {
     }
 
@@ -100,7 +140,7 @@ namespace polysolve::nonlinear
         spdlog::logger &logger,
         const NormType norm_type,
         const int dimension)
-        : Superclass(sparse, extract_param("ProjectedNewton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger, norm_type, dimension)
+        : Superclass(sparse, "ProjectedNewton", solver_params, linear_solver_params, characteristic_length, logger, norm_type, dimension)
     {
     }
 
@@ -113,7 +153,7 @@ namespace polysolve::nonlinear
         spdlog::logger &logger,
         const NormType norm_type,
         const int dimension)
-        : Superclass(sparse, extract_param("RegularizedNewton", "residual_tolerance", solver_params), solver_params, linear_solver_params, characteristic_length, logger, norm_type, dimension),
+        : Superclass(sparse, "RegularizedNewton", solver_params, linear_solver_params, characteristic_length, logger, norm_type, dimension),
           project_to_psd(project_to_psd)
     {
         reg_weight_min = extract_param("RegularizedNewton", "reg_weight_min", solver_params);
@@ -217,14 +257,23 @@ namespace polysolve::nonlinear
             linear_solver->solve(-grad, direction); // H Δx = -g
         }
 
-        const double residual = objFunc.grad_norm(hessian * direction + grad, norm_type); // H Δx + g = 0
+        const TVector r0 = hessian * direction + grad;           // H Δx + g = 0
+        const double residual = objFunc.grad_norm(r0, norm_type); // unperturbed residual
+
+        json info;
+        if (track_info)
+            linear_solver->get_info(info);
+
+        // Only perturb a solve that would be accepted: a rejected direction is discarded anyway.
+        if (perturbation_enabled() && std::isfinite(residual) && residual <= residual_tolerance)
+        {
+            const TVector v = random_perturbation(direction.size());
+            const TVector w = hessian * v;
+            apply_perturbation(objFunc, grad, r0, v, w, direction, info);
+        }
 
         if (track_info)
-        {
-            json info;
-            linear_solver->get_info(info);
             internal_solver_info.push_back(info);
-        }
 
         return residual;
     }
@@ -268,14 +317,102 @@ namespace polysolve::nonlinear
         m_hessian_direction.noalias() = hessian * direction;
         const double residual = (m_hessian_direction + grad).norm(); // H Δx + g = 0
 
+        json info;
         if (track_info)
-        {
-            json info;
             linear_solver->get_info(info);
-            internal_solver_info.push_back(info);
+
+        // Only perturb a solve that would be accepted: a rejected direction is discarded anyway.
+        if (perturbation_enabled() && std::isfinite(residual) && residual <= residual_tolerance)
+        {
+            const TVector r0 = m_hessian_direction + grad;
+            const TVector v = random_perturbation(direction.size());
+            const TVector w = hessian * v;
+            apply_perturbation(objFunc, grad, r0, v, w, direction, info);
         }
 
+        if (track_info)
+            internal_solver_info.push_back(info);
+
         return residual;
+    }
+
+    // =======================================================================
+
+    Newton::TVector Newton::random_perturbation(const int size)
+    {
+        std::normal_distribution<double> normal(0.0, 1.0);
+        TVector v(size);
+        for (int i = 0; i < size; ++i)
+            v[i] = normal(perturb_rng);
+        return v;
+    }
+
+    void Newton::apply_perturbation(const Problem &objFunc,
+                                    const TVector &grad,
+                                    const TVector &r0,
+                                    const TVector &v,
+                                    const TVector &w,
+                                    TVector &direction,
+                                    json &info) const
+    {
+        const double r0_norm = objFunc.grad_norm(r0, norm_type);
+        const double target = perturb_relative
+                                  ? perturb_target_residual * objFunc.grad_norm(grad, norm_type)
+                                  : perturb_target_residual;
+        const double w_norm = objFunc.grad_norm(w, norm_type);
+
+        double alpha = 0;
+        double achieved = r0_norm;
+
+        if (!(target > r0_norm))
+        {
+            m_logger.debug("[{}] linear solve residual {:g} already >= perturbation target {:g}; not perturbing",
+                           name(), r0_norm, target);
+        }
+        else if (!(w_norm > 0) || !std::isfinite(w_norm))
+        {
+            m_logger.warn("[{}] ‖H v‖={:g} for the random perturbation v; not perturbing", name(), w_norm);
+        }
+        else
+        {
+            // f(a) = ‖r0 + a w‖ - target is convex with f(0) < 0, and by the triangle
+            // inequality f(hi) >= 0 for hi = (target + ‖r0‖) / ‖w‖. Bisect for the root.
+            TVector r(r0.size());
+            const auto f = [&](const double a) {
+                r = r0;
+                r.noalias() += a * w;
+                return objFunc.grad_norm(r, norm_type) - target;
+            };
+
+            double lo = 0, hi = (target + r0_norm) / w_norm;
+            alpha = hi;
+            for (int it = 0; it < 200; ++it)
+            {
+                alpha = 0.5 * (lo + hi);
+                const double fa = f(alpha);
+                if (std::abs(fa) <= 1e-12 * target || hi - lo <= 1e-15 * hi)
+                    break;
+                (fa < 0 ? lo : hi) = alpha;
+            }
+
+            direction.noalias() += alpha * v;
+            achieved = f(alpha) + target;
+
+            if (m_logger.should_log(spdlog::level::debug))
+                m_logger.debug("[{}] perturbed linear solve: residual {:g} -> {:g} (target {:g}, ‖∇f‖={:g})",
+                               name(), r0_norm, achieved, target, objFunc.grad_norm(grad, norm_type));
+        }
+
+        if (track_info)
+        {
+            info["perturbation"] = {
+                {"unperturbed_residual", r0_norm},
+                {"perturbed_residual", achieved},
+                {"target_residual", target},
+                {"alpha", alpha},
+                {"perturbation_norm", alpha * v.norm()},
+            };
+        }
     }
     // =======================================================================
 
